@@ -1,0 +1,16 @@
+[
+  {
+    "agentId": "nova-star",
+    "name": "Nova Star",
+    "isMain": true,
+    "state": "idle",
+    "detail": "Nova Platform 虚拟助手",
+    "updated_at": "2026-04-18T07:21:15.027024",
+    "area": "breakroom",
+    "source": "local",
+    "joinKey": null,
+    "authStatus": "approved",
+    "authExpiresAt": null,
+    "lastPushAt": null
+  }
+]
