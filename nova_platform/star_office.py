@@ -55,8 +55,8 @@ JOIN_KEYS_FILE = os.path.join(STAR_OFFICE_ROOT, 'join-keys.json')
 
 star_office_bp = Blueprint('star_office', __name__, 
                            template_folder='templates',
-                           static_folder='static',
-                           static_url_path='/office/static')
+                           static_folder=STAR_OFFICE_STATIC,
+                           static_url_path='/')
 
 
 def load_state():

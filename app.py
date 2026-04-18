@@ -3,7 +3,7 @@ Nova Platform - Web Dashboard
 美观的可视化看板，无需登录
 """
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, send_from_directory, request
 import sys
 import os
 
@@ -11,13 +11,42 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from nova_platform.database import init_db, get_session
 from nova_platform.models import Project, Employee, ProjectMember, Todo
-from nova_platform.star_office import star_office_bp
+from nova_platform.star_office import (
+    star_office_bp, STAR_OFFICE_STATIC,
+    load_state, save_state, load_agents_state, save_agents_state
+)
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None)
 app.config['JSON_AS_ASCII'] = False
 
 # 注册 Star Office UI 蓝图
 app.register_blueprint(star_office_bp, url_prefix='/office')
+
+# Star Office 静态文件路由
+@app.route('/static/<path:filename>')
+def serve_star_office_static(filename):
+    return send_from_directory(STAR_OFFICE_STATIC, filename)
+
+# 代理 Star Office API 到根路径（前端 JS 调用 /status, /agents 等）
+@app.route('/status', methods=['GET'])
+def proxy_status():
+    from nova_platform.star_office import get_status
+    return get_status()
+
+@app.route('/agents', methods=['GET'])
+def proxy_agents():
+    from nova_platform.star_office import get_agents
+    return get_agents()
+
+@app.route('/set_state', methods=['POST'])
+def proxy_set_state():
+    from nova_platform.star_office import set_state
+    return set_state()
+
+@app.route('/yesterday-memo', methods=['GET'])
+def proxy_yesterday_memo():
+    from nova_platform.star_office import get_yesterday_memo
+    return get_yesterday_memo()
 
 
 def get_stats():
@@ -138,8 +167,8 @@ def get_employees():
 
 @app.route('/')
 def index():
-    """渲染看板页面"""
-    return render_template('dashboard.html')
+    """渲染整合后的主界面"""
+    return render_template('index.html')
 
 
 @app.route('/api/stats')

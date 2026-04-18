@@ -1,6 +1,6 @@
 {
-  "state": "idle",
-  "detail": "Waiting...",
+  "state": "error",
+  "detail": "报警中",
   "progress": 0,
-  "updated_at": "2026-02-26T00:00:00"
+  "updated_at": "2026-04-18T08:40:11.227839"
 }
