@@ -58,19 +58,24 @@ async function loadMemo() {
   const memoDate = document.getElementById('memo-date');
   const memoContent = document.getElementById('memo-content');
 
+  // 如果memo元素不存在，直接返回（不在办公室视图中）
+  if (!memoDate && !memoContent) {
+    return;
+  }
+
   try {
     const response = await fetch('/yesterday-memo?t=' + Date.now(), { cache: 'no-store' });
     const data = await response.json();
 
     if (data.success && data.memo) {
-      memoDate.textContent = data.date || '';
-      memoContent.innerHTML = data.memo.replace(/\n/g, '<br>');
+      if (memoDate) memoDate.textContent = data.date || '';
+      if (memoContent) memoContent.innerHTML = data.memo.replace(/\n/g, '<br>');
     } else {
-      memoContent.innerHTML = '<div id="memo-placeholder">暂无昨日日记</div>';
+      if (memoContent) memoContent.innerHTML = '<div id="memo-placeholder">暂无昨日日记</div>';
     }
   } catch (e) {
     console.error('加载 memo 失败:', e);
-    memoContent.innerHTML = '<div id="memo-placeholder">加载失败</div>';
+    if (memoContent) memoContent.innerHTML = '<div id="memo-placeholder">加载失败</div>';
   }
 }
 
@@ -548,21 +553,26 @@ function create() {
   coordsDisplay = document.getElementById('coords-display');
   coordsToggle = document.getElementById('coords-toggle');
 
-  coordsToggle.addEventListener('click', () => {
-    showCoords = !showCoords;
-    coordsOverlay.style.display = showCoords ? 'block' : 'none';
-    coordsToggle.textContent = showCoords ? '隐藏坐标' : '显示坐标';
-    coordsToggle.style.background = showCoords ? '#e94560' : '#333';
-  });
+  // 仅在调试元素存在时添加事件监听
+  if (coordsToggle) {
+    coordsToggle.addEventListener('click', () => {
+      showCoords = !showCoords;
+      if (coordsOverlay) coordsOverlay.style.display = showCoords ? 'block' : 'none';
+      coordsToggle.textContent = showCoords ? '隐藏坐标' : '显示坐标';
+      coordsToggle.style.background = showCoords ? '#e94560' : '#333';
+    });
 
-  game.input.on('pointermove', (pointer) => {
-    if (!showCoords) return;
-    const x = Math.max(0, Math.min(config.width - 1, Math.round(pointer.x)));
-    const y = Math.max(0, Math.min(config.height - 1, Math.round(pointer.y)));
-    coordsDisplay.textContent = `${x}, ${y}`;
-    coordsOverlay.style.left = (pointer.x + 18) + 'px';
-    coordsOverlay.style.top = (pointer.y + 18) + 'px';
-  });
+    game.input.on('pointermove', (pointer) => {
+      if (!showCoords) return;
+      const x = Math.max(0, Math.min(config.width - 1, Math.round(pointer.x)));
+      const y = Math.max(0, Math.min(config.height - 1, Math.round(pointer.y)));
+      if (coordsDisplay) coordsDisplay.textContent = `${x}, ${y}`;
+      if (coordsOverlay) {
+        coordsOverlay.style.left = (pointer.x + 18) + 'px';
+        coordsOverlay.style.top = (pointer.y + 18) + 'px';
+      }
+    });
+  }
 
   loadMemo();
   fetchStatus();
@@ -683,7 +693,7 @@ function update(time) {
 
   if (typewriterIndex < typewriterTarget.length && time - lastTypewriter > TYPEWRITER_DELAY) {
     typewriterText += typewriterTarget[typewriterIndex];
-    statusText.textContent = typewriterText;
+    if (statusText) statusText.textContent = typewriterText;
     typewriterIndex++;
     lastTypewriter = time;
   }
@@ -912,7 +922,7 @@ function showCatBubble() {
 }
 
 function fetchAgents() {
-  fetch('/agents?t=' + Date.now(), { cache: 'no-store' })
+  fetch('/api/agents?t=' + Date.now(), { cache: 'no-store' })
     .then(response => response.json())
     .then(data => {
       if (!Array.isArray(data)) return;
@@ -951,7 +961,8 @@ function renderAgent(agent) {
   const agentId = agent.agentId;
   const name = agent.name || 'Agent';
   const area = agent.area || 'breakroom';
-  const authStatus = agent.authStatus || 'pending';
+  const state = agent.state || 'idle';
+  const authStatus = agent.authStatus || 'approved';
   const isMain = !!agent.isMain;
 
   // 获取这个 agent 在区域里的位置
@@ -959,50 +970,65 @@ function renderAgent(agent) {
   const baseX = pos.x;
   const baseY = pos.y;
 
-  // 颜色
-  const bodyColor = AGENT_COLORS[agentId] || AGENT_COLORS.default;
-  const nameColor = NAME_TAG_COLORS[authStatus] || NAME_TAG_COLORS.default;
+  // 根据状态选择颜色（用于角色 tint）
+  let tintColor = 0xffffff;
+  if (state === 'idle') tintColor = 0x94a3b8;
+  if (state === 'executing') tintColor = 0x3b82f6;
+  if (state === 'researching') tintColor = 0xf59e0b;
+  if (state === 'error') tintColor = 0xef4444;
+  if (state === 'writing') tintColor = 0x10b981;
+  if (state === 'syncing') tintColor = 0x8b5cf6;
 
-  // 透明度（离线/待批准/拒绝时变半透明）
+  // 根据authStatus调整透明度
   let alpha = 1;
   if (authStatus === 'pending') alpha = 0.7;
   if (authStatus === 'rejected') alpha = 0.4;
   if (authStatus === 'offline') alpha = 0.5;
 
   if (!agents[agentId]) {
-    // 新建 agent
+    // 新建 agent - 使用 star 角色素材
     const container = game.add.container(baseX, baseY);
-    container.setDepth(1200 + (isMain ? 100 : 0)); // 放到最顶层！
+    container.setDepth(1200 + (isMain ? 100 : 0));
 
-    // 像素小人：用星星图标，更明显
-    const starIcon = game.add.text(0, 0, '⭐', {
-      fontFamily: 'ArkPixel, monospace',
-      fontSize: '32px'
-    }).setOrigin(0.5);
-    starIcon.name = 'starIcon';
+    // 使用 star 角色精灵（根据状态选择动画）
+    let animKey = 'star_idle';
+    if (state === 'executing' || state === 'writing') animKey = 'star_working';
+    if (state === 'researching') animKey = 'star_researching';
 
-    // 名字标签（漂浮）
-    const nameTag = game.add.text(0, -36, name, {
+    // 创建角色精灵
+    const agentSprite = game.add.sprite(0, 0, animKey).setOrigin(0.5);
+    agentSprite.setScale(1.4); // 与主star相同大小
+    agentSprite.setAlpha(alpha);
+    agentSprite.setTint(tintColor);
+    agentSprite.anims.play(animKey, true);
+    agentSprite.name = 'agentSprite';
+
+    // 名字标签（漂浮在角色上方）
+    const nameTag = game.add.text(0, -50, name, {
       fontFamily: 'ArkPixel, monospace',
-      fontSize: '14px',
-      fill: '#' + nameColor.toString(16).padStart(6, '0'),
-      stroke: '#000',
+      fontSize: '12px',
+      fill: '#ffffff',
+      stroke: '#000000',
       strokeThickness: 3,
-      backgroundColor: 'rgba(255,255,255,0.95)'
+      backgroundColor: 'rgba(0,0,0,0.7)'
     }).setOrigin(0.5);
     nameTag.name = 'nameTag';
 
-    // 状态小点（绿色/黄色/红色）
-    let dotColor = 0x64748b;
-    if (authStatus === 'approved') dotColor = 0x22c55e;
-    if (authStatus === 'pending') dotColor = 0xf59e0b;
-    if (authStatus === 'rejected') dotColor = 0xef4444;
-    if (authStatus === 'offline') dotColor = 0x94a3b8;
-    const statusDot = game.add.circle(20, -20, 5, dotColor, alpha);
-    statusDot.setStrokeStyle(2, 0x000000, alpha);
-    statusDot.name = 'statusDot';
+    // 状态指示器（小图标而非圆点）
+    let statusIcon = '💤';
+    if (state === 'idle') statusIcon = '💤';
+    if (state === 'executing' || state === 'writing') statusIcon = '⚡';
+    if (state === 'researching') statusIcon = '🔍';
+    if (state === 'error') statusIcon = '❌';
+    if (state === 'syncing') statusIcon = '🔄';
 
-    container.add([starIcon, statusDot, nameTag]);
+    const statusIndicator = game.add.text(20, -20, statusIcon, {
+      fontFamily: 'ArkPixel, monospace',
+      fontSize: '16px'
+    }).setOrigin(0.5);
+    statusIndicator.name = 'statusIndicator';
+
+    container.add([agentSprite, statusIndicator, nameTag]);
     agents[agentId] = container;
   } else {
     // 更新 agent
@@ -1011,21 +1037,38 @@ function renderAgent(agent) {
     container.setAlpha(alpha);
     container.setDepth(1200 + (isMain ? 100 : 0));
 
-    // 更新名字和颜色（如果变化）
+    // 更新角色动画和颜色
+    const agentSprite = container.getAt(0);
+    if (agentSprite && agentSprite.name === 'agentSprite') {
+      agentSprite.setTint(tintColor);
+      agentSprite.setAlpha(alpha);
+
+      // 根据状态切换动画
+      let animKey = 'star_idle';
+      if (state === 'executing' || state === 'writing') animKey = 'star_working';
+      if (state === 'researching') animKey = 'star_researching';
+
+      if (agentSprite.anims.getName() !== animKey) {
+        agentSprite.anims.play(animKey, true);
+      }
+    }
+
+    // 更新状态图标
+    const statusIndicator = container.getAt(1);
+    if (statusIndicator && statusIndicator.name === 'statusIndicator') {
+      let statusIcon = '💤';
+      if (state === 'idle') statusIcon = '💤';
+      if (state === 'executing' || state === 'writing') statusIcon = '⚡';
+      if (state === 'researching') statusIcon = '🔍';
+      if (state === 'error') statusIcon = '❌';
+      if (state === 'syncing') statusIcon = '🔄';
+      statusIndicator.setText(statusIcon);
+    }
+
+    // 更新名字
     const nameTag = container.getAt(2);
     if (nameTag && nameTag.name === 'nameTag') {
       nameTag.setText(name);
-      nameTag.setFill('#' + (NAME_TAG_COLORS[authStatus] || NAME_TAG_COLORS.default).toString(16).padStart(6, '0'));
-    }
-    // 更新状态点颜色
-    const statusDot = container.getAt(1);
-    if (statusDot && statusDot.name === 'statusDot') {
-      let dotColor = 0x64748b;
-      if (authStatus === 'approved') dotColor = 0x22c55e;
-      if (authStatus === 'pending') dotColor = 0xf59e0b;
-      if (authStatus === 'rejected') dotColor = 0xef4444;
-      if (authStatus === 'offline') dotColor = 0x94a3b8;
-      statusDot.fillColor = dotColor;
     }
   }
 }

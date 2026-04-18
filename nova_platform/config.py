@@ -30,6 +30,9 @@ DEFAULT_CONFIG = {
     "database": {
         "path": "~/.nova-platform/nova.db",
     },
+    "workspace": {
+        "root": "~/.nova/workspaces",  # 工作空间根目录
+    },
     "star_office": {
         "enabled": True,
         "static_path": "templates/star_office/static",
@@ -97,6 +100,13 @@ def reload_config():
 def get_server_config() -> dict:
     """Get server configuration."""
     return get_config().get("server", DEFAULT_CONFIG["server"])
+
+
+def get_workspace_root() -> str:
+    """Get workspace root directory."""
+    cfg = get_config()
+    root = cfg.get("workspace", DEFAULT_CONFIG["workspace"]).get("root", "~/.nova/workspaces")
+    return os.path.expanduser(root)
 
 
 def get_env() -> str:

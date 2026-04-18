@@ -1,224 +1,397 @@
 """
-Human Interaction Service - Agent与人类交互服务
+人类交互服务
 
-处理Agent向人类提问、获取回答以及Human-in-the-Loop机制。
+处理Leader与人类之间的沟通：
+- 创建交互请求
+- 接收人类响应
+- 检查依赖关系
+- 触发Leader继续处理
 """
 
 import json
-from datetime import datetime
-from typing import Optional, List, Dict
+from datetime import datetime, timedelta
+from typing import Optional, List
 from sqlalchemy.orm import Session
 
-from nova_platform.models import Employee, Project
+from nova_platform.models import (
+    Project, HumanInteraction, LeaderInvocationLock,
+    Employee, ProjectMember
+)
 
 
-class HumanQuestion:
-    """人类问题表（暂时使用字典模拟，后续迁移到ORM）"""
-    def __init__(self, id, project_id, question, context, status, asked_at, answered_at=None, answer=None):
-        self.id = id
-        self.project_id = project_id
-        self.question = question
-        self.context = context
-        self.status = status
-        self.asked_at = asked_at
-        self.answered_at = answered_at
-        self.answer = answer
+class HumanInteractionService:
+    """人类交互服务"""
 
+    async def create_interaction(
+        self,
+        session: Session,
+        project_id: str,
+        interaction_type: str,
+        questions: List[str],
+        context: dict,
+        source: str = "leader",
+        leader_recommendation: str = "",
+        depends_on: List[str] = None
+    ) -> HumanInteraction:
+        """
+        创建人类交互请求
 
-# 临时存储（生产环境应使用数据库）
-_questions_store: Dict[str, Dict] = {}
+        Args:
+            session: 数据库会话
+            project_id: 项目ID
+            interaction_type: 交互类型（clarification_needed, decision_needed等）
+            questions: 问题列表
+            context: 上下文信息
+            source: 来源（leader, system）
+            leader_recommendation: Leader的建议
+            depends_on: 依赖的其他交互ID列表
 
+        Returns:
+            HumanInteraction对象
+        """
 
-def ask_human(
-    session: Session,
-    project_id: str,
-    question: str,
-    context: Optional[Dict] = None,
-    priority: str = "normal"
-) -> Dict:
-    """Agent向人类提问
+        # 检查依赖
+        if depends_on:
+            for dep_id in depends_on:
+                dep = session.query(HumanInteraction).filter_by(id=dep_id).first()
+                if not dep or dep.status != "answered":
+                    raise ValueError(f"依赖交互未完成或不存在: {dep_id}")
 
-    Args:
-        session: 数据库会话
-        project_id: 项目ID
-        question: 问题内容
-        context: 上下文信息（字典）
-        priority: 优先级 (low/normal/high/urgent)
+        interaction = HumanInteraction(
+            project_id=project_id,
+            interaction_type=interaction_type,
+            source=source,
+            context=json.dumps(context, ensure_ascii=False),
+            questions=json.dumps(questions, ensure_ascii=False),
+            leader_recommendation=leader_recommendation,
+            depends_on_interactions=json.dumps(depends_on or [], ensure_ascii=False),
+            status="pending"
+        )
 
-    Returns:
-        {
-            "id": "问题ID",
-            "question": "问题内容",
-            "status": "pending",
-            "asked_at": "提问时间"
+        session.add(interaction)
+        session.commit()
+        session.refresh(interaction)
+
+        # 更新项目状态
+        project = session.query(Project).filter_by(id=project_id).first()
+        if project and project.status != "awaiting_human":
+            project.status = "awaiting_human"
+            session.commit()
+
+        return interaction
+
+    async def answer_interaction(
+        self,
+        session: Session,
+        interaction_id: str,
+        response: str,
+        responder: str = "web_user"
+    ) -> dict:
+        """
+        回答人类交互
+
+        Args:
+            session: 数据库会话
+            interaction_id: 交互ID
+            response: 人类响应
+            responder: 响应者标识
+
+        Returns:
+            处理结果
+        """
+
+        interaction = session.query(HumanInteraction).filter_by(
+            id=interaction_id
+        ).first()
+
+        if not interaction:
+            return {"success": False, "error": "交互不存在"}
+
+        if interaction.status != "pending":
+            return {"success": False, "error": f"交互已关闭（状态: {interaction.status}）"}
+
+        # 记录响应
+        interaction.human_response = response
+        interaction.status = "answered"
+        interaction.response_at = datetime.utcnow()
+        session.commit()
+
+        # 检查是否可以恢复项目
+        project_id = interaction.project_id
+        check_result = await self.check_and_resume(session, project_id)
+
+        # TODO: 根据交互类型触发Leader的后续处理
+        if check_result.get("action") == "resumed":
+            leader_action = await self._trigger_leader_resume(
+                session, interaction
+            )
+            interaction.leader_action_taken = json.dumps(leader_action, ensure_ascii=False)
+            interaction.action_taken_at = datetime.utcnow()
+            session.commit()
+
+        return {
+            "success": True,
+            "interaction_id": interaction_id,
+            "project_can_resume": check_result.get("can_resume", False),
+            "project_action": check_result.get("action")
         }
-    """
-    import uuid
 
-    question_id = str(uuid.uuid4())
-    now = datetime.utcnow()
+    async def check_and_resume(
+        self,
+        session: Session,
+        project_id: str
+    ) -> dict:
+        """
+        检查人类交互是否全部完成，如果完成则恢复项目
 
-    question_data = {
-        "id": question_id,
-        "project_id": project_id,
-        "question": question,
-        "context": json.dumps(context) if context else None,
-        "status": "pending",
-        "priority": priority,
-        "asked_at": now.isoformat(),
-        "answered_at": None,
-        "answer": None
-    }
+        Args:
+            session: 数据库会话
+            project_id: 项目ID
 
-    _questions_store[question_id] = question_data
+        Returns:
+            检查结果
+        """
 
-    # TODO: 发送通知（邮件、Web推送等）
-    # 可以在这里集成邮件发送或WebSocket推送
+        # 统计待处理的交互
+        pending_count = session.query(HumanInteraction).filter(
+            HumanInteraction.project_id == project_id,
+            HumanInteraction.status == "pending"
+        ).count()
 
-    return {
-        "id": question_id,
-        "question": question,
-        "status": "pending",
-        "asked_at": now.isoformat(),
-        "priority": priority
-    }
+        if pending_count > 0:
+            # 还有待处理的交互
+            return {
+                "can_resume": False,
+                "pending_count": pending_count,
+                "action": "waiting_for_more_responses"
+            }
 
+        # 所有交互已完成，恢复项目
+        project = session.query(Project).filter_by(id=project_id).first()
+        if project and project.status == "awaiting_human":
+            project.status = "active"
+            session.commit()
 
-def get_pending_questions(session: Session, project_id: str) -> List[Dict]:
-    """获取待回答的问题"""
-    pending = []
-    for q_id, q_data in _questions_store.items():
-        if q_data["project_id"] == project_id and q_data["status"] == "pending":
-            pending.append(q_data)
+            return {
+                "can_resume": True,
+                "action": "resumed"
+            }
 
-    # 按优先级和提问时间排序
-    priority_order = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-    pending.sort(key=lambda x: (
-        priority_order.get(x.get("priority", "normal"), 2),
-        x["asked_at"]
-    ))
+        return {
+            "can_resume": True,
+            "action": "already_active"
+        }
 
-    return pending
+    async def _trigger_leader_resume(
+        self,
+        session: Session,
+        interaction: HumanInteraction
+    ) -> dict:
+        """
+        触发Leader处理人类响应
 
+        Args:
+            session: 数据库会话
+            interaction: 交互对象
 
-def answer_question(session: Session, question_id: str, answer: str) -> Optional[Dict]:
-    """回答问题"""
-    if question_id not in _questions_store:
-        return None
+        Returns:
+            Leader的处理动作
+        """
 
-    question_data = _questions_store[question_id]
-    question_data["answer"] = answer
-    question_data["status"] = "answered"
-    question_data["answered_at"] = datetime.utcnow().isoformat()
+        project_id = interaction.project_id
 
-    return question_data
+        # 根据交互类型决定后续动作
+        if interaction.interaction_type == "clarification_needed":
+            # 需求澄清后，重新尝试拆解
+            context = json.loads(interaction.context or "{}")
+            requirement = context.get("requirement", "")
 
+            if requirement:
+                # 调用WBS服务继续拆解
+                from nova_platform.services.wbs_service import wbs_service
 
-def skip_question(session: Session, question_id: str, reason: str = "") -> Optional[Dict]:
-    """跳过问题"""
-    if question_id not in _questions_store:
-        return None
+                result = await wbs_service.decompose_incremental(
+                    session, project_id, [requirement]
+                )
 
-    question_data = _questions_store[question_id]
-    question_data["status"] = "skipped"
-    question_data["answer"] = f"[SKIPPED] {reason}" if reason else "[SKIPPED]"
-    question_data["answered_at"] = datetime.utcnow().isoformat()
+                return {
+                    "action": "continued_decomposition",
+                    "result": result
+                }
 
-    return question_data
+        elif interaction.interaction_type == "decision_needed":
+            # 决策后，执行决策
+            # TODO: 实现决策执行逻辑
+            pass
 
+        return {
+            "action": "not_implemented",
+            "message": f"交互类型 {interaction.interaction_type} 的后续处理尚未实现"
+        }
 
-def get_question(session: Session, question_id: str) -> Optional[Dict]:
-    """获取单个问题详情"""
-    return _questions_store.get(question_id)
+    def get_pending_interactions(
+        self,
+        session: Session,
+        project_id: str = None
+    ) -> List[HumanInteraction]:
+        """
+        获取待处理的交互
 
+        Args:
+            session: 数据库会话
+            project_id: 项目ID（可选，为None则获取所有）
 
-def should_ask_human(session: Session, project_id: str, context: Dict) -> bool:
-    """判断是否需要向人类提问
+        Returns:
+            待处理交互列表
+        """
 
-    基于以下条件判断：
-    1. 有阻塞性问题需要决策
-    2. 多个OKR处于at_risk状态
-    3. 长时间未获得人类反馈
-    """
-    from nova_platform.services import okr_service
+        query = session.query(HumanInteraction).filter(
+            HumanInteraction.status == "pending"
+        )
 
-    # 检查OKR健康度
-    health = okr_service.check_okr_health(session, project_id)
+        if project_id:
+            query = query.filter(HumanInteraction.project_id == project_id)
 
-    # 如果有OKR处于at_risk状态，需要人类介入
-    if health["overall"] == "at_risk":
+        return query.order_by(HumanInteraction.created_at).all()
+
+    def get_interaction(
+        self,
+        session: Session,
+        interaction_id: str
+    ) -> Optional[HumanInteraction]:
+        """获取单个交互"""
+        return session.query(HumanInteraction).filter_by(id=interaction_id).first()
+
+    def skip_interaction(
+        self,
+        session: Session,
+        interaction_id: str,
+        reason: str
+    ) -> bool:
+        """
+        跳过交互（不等待响应，直接继续）
+
+        Args:
+            session: 数据库会话
+            interaction_id: 交互ID
+            reason: 跳过原因
+
+        Returns:
+            是否成功
+        """
+
+        interaction = session.query(HumanInteraction).filter_by(
+            id=interaction_id
+        ).first()
+
+        if not interaction or interaction.status != "pending":
+            return False
+
+        interaction.status = "skipped"
+        interaction.human_response = f"已跳过: {reason}"
+        interaction.response_at = datetime.utcnow()
+        session.commit()
+
+        # 检查是否可以恢复项目
+        import asyncio
+        asyncio.create_task(self.check_and_resume(session, interaction.project_id))
+
         return True
 
-    # 检查是否有未解决的阻塞性问题
-    blockers = context.get("blockers", [])
-    if len(blockers) > 2:
-        return True
 
-    # 检查距离上次人类反馈的时间
-    last_feedback = context.get("last_human_feedback")
-    if last_feedback:
-        last_feedback_time = datetime.fromisoformat(last_feedback)
-        if (datetime.utcnow() - last_feedback_time).total_seconds() > 86400:  # 24小时
-            return True
+class HumanInteractionMonitor:
+    """人类交互监控服务 - 后台定时运行"""
 
-    return False
+    def __init__(self, check_interval: int = 30):
+        """
+        Args:
+            check_interval: 检查间隔（秒）
+        """
+        self.check_interval = check_interval
+        self.running = False
+
+    async def monitor_all_projects(self, session: Session) -> dict:
+        """
+        监控所有等待人类响应的项目
+
+        Args:
+            session: 数据库会话
+
+        Returns:
+            监控结果
+        """
+
+        # 找出所有等待人类响应的项目
+        awaiting_projects = session.query(Project).filter(
+            Project.status == "awaiting_human"
+        ).all()
+
+        results = {
+            "awaiting_count": len(awaiting_projects),
+            "projects": [],
+            "resumed": []
+        }
+
+        for project in awaiting_projects:
+            project_result = await self._monitor_project(session, project.id)
+            results["projects"].append(project_result)
+
+            if project_result.get("resumed"):
+                results["resumed"].append(project.id)
+
+        return results
+
+    async def _monitor_project(
+        self,
+        session: Session,
+        project_id: str
+    ) -> dict:
+        """
+        监控单个项目
+
+        Args:
+            session: 数据库会话
+            project_id: 项目ID
+
+        Returns:
+            监控结果
+        """
+
+        service = HumanInteractionService()
+        return await service.check_and_resume(session, project_id)
+
+    def start_monitoring(self):
+        """启动监控（在后台运行）"""
+        import asyncio
+        import threading
+
+        def run_monitor():
+            asyncio.run(self._monitor_loop())
+
+        self.running = True
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+    def stop_monitoring(self):
+        """停止监控"""
+        self.running = False
+
+    async def _monitor_loop(self):
+        """监控循环"""
+        from nova_platform.database import get_db_session
+
+        while self.running:
+            try:
+                with get_db_session() as session:
+                    await self.monitor_all_projects(session)
+            except Exception as e:
+                print(f"监控出错: {e}")
+
+            # 等待下一次检查
+            import asyncio
+            await asyncio.sleep(self.check_interval)
 
 
-def generate_question_from_context(session: Session, project_id: str, context: Dict) -> Optional[str]:
-    """根据上下文自动生成问题"""
-    blockers = context.get("blockers", [])
-    health = context.get("okr_health", {})
-
-    if health.get("overall") == "at_risk":
-        return f"项目OKR健康度为 at_risk，是否需要调整目标或增加资源？"
-
-    if len(blockers) > 0:
-        blocker_names = [b.get("todo", {}).title for b in blockers[:3]]
-        return f"以下任务已被阻塞较长时间：{', '.join(blocker_names)}。是否需要重新分配或取消？"
-
-    pending_tasks = context.get("pending_tasks", 0)
-    if pending_tasks > 10:
-        return f"当前有{pending_tasks}个待处理任务，是否需要增加Agent成员或调整优先级？"
-
-    return None
-
-
-def get_interaction_summary(session: Session, project_id: str) -> Dict:
-    """获取人类交互摘要"""
-    all_questions = [q for q in _questions_store.values() if q["project_id"] == project_id]
-
-    summary = {
-        "total": len(all_questions),
-        "pending": 0,
-        "answered": 0,
-        "skipped": 0,
-        "avg_response_time_hours": 0,
-        "recent_questions": []
-    }
-
-    total_response_time = 0
-    answered_count = 0
-
-    for q in sorted(all_questions, key=lambda x: x["asked_at"], reverse=True)[:10]:
-        summary["recent_questions"].append({
-            "id": q["id"],
-            "question": q["question"][:100] + "..." if len(q["question"]) > 100 else q["question"],
-            "status": q["status"],
-            "asked_at": q["asked_at"],
-            "answered_at": q["answered_at"]
-        })
-
-    for q in all_questions:
-        summary[q["status"]] = summary.get(q["status"], 0) + 1
-
-        if q["status"] == "answered" and q["answered_at"]:
-            asked_at = datetime.fromisoformat(q["asked_at"])
-            answered_at = datetime.fromisoformat(q["answered_at"])
-            response_time_hours = (answered_at - asked_at).total_seconds() / 3600
-            total_response_time += response_time_hours
-            answered_count += 1
-
-    if answered_count > 0:
-        summary["avg_response_time_hours"] = total_response_time / answered_count
-
-    return summary
+# 全局服务实例
+human_interaction_service = HumanInteractionService()
+human_interaction_monitor = HumanInteractionMonitor()

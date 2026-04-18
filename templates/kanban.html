@@ -1,0 +1,1464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nova Platform - AI协作看板</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        @font-face {
+            font-family: 'ArkPixel';
+            src: url('/static/fonts/ark-pixel-12px-proportional-zh_cn.ttf.woff2') format('woff2');
+            font-weight: normal;
+            font-style: normal;
+        }
+        :root {
+            --bg-primary: #0f1419;
+            --bg-secondary: #1a2332;
+            --bg-card: #232f3e;
+            --bg-card-hover: #2d3a4d;
+            --text-primary: #f7f9fc;
+            --text-secondary: #8b9db5;
+            --text-muted: #5c6d84;
+            --accent-blue: #3b82f6;
+            --accent-blue-glow: rgba(59, 130, 246, 0.3);
+            --accent-green: #10b981;
+            --accent-green-glow: rgba(16, 185, 129, 0.3);
+            --accent-amber: #f59e0b;
+            --accent-amber-glow: rgba(245, 158, 11, 0.3);
+            --accent-red: #ef4444;
+            --accent-purple: #8b5cf6;
+            --accent-cyan: #06b6d4;
+            --border-color: rgba(139, 157, 181, 0.15);
+            --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background:
+                radial-gradient(ellipse at 20% 20%, rgba(59, 130, 246, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(139, 92, 246, 0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(16, 185, 129, 0.04) 0%, transparent 70%);
+            z-index: -1;
+            animation: bgFloat 20s ease-in-out infinite;
+        }
+
+        @keyframes bgFloat {
+            0%, 100% { transform: translate(0, 0) rotate(0deg); }
+            33% { transform: translate(2%, 2%) rotate(1deg); }
+            66% { transform: translate(-1%, 1%) rotate(-1deg); }
+        }
+
+        /* Header */
+        .header {
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(15, 20, 25, 0.8);
+            backdrop-filter: blur(20px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+
+        .logo-text {
+            font-size: 20px;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--text-primary), var(--accent-blue));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo-sub {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .view-tabs {
+            display: flex;
+            gap: 4px;
+            background: var(--bg-secondary);
+            padding: 4px;
+            border-radius: 10px;
+        }
+
+        .view-tab {
+            padding: 8px 20px;
+            border-radius: 7px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            background: transparent;
+        }
+
+        .view-tab:hover {
+            color: var(--text-primary);
+            background: var(--bg-card);
+        }
+
+        .view-tab.active {
+            color: var(--text-primary);
+            background: var(--accent-blue);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-card);
+            color: var(--text-secondary);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .btn-primary {
+            background: var(--accent-blue);
+            color: white;
+            border-color: var(--accent-blue);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-blue);
+            color: white;
+        }
+
+        /* Main Container */
+        .main-container {
+            max-width: 1800px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        /* View Containers */
+        .view-container {
+            display: none;
+        }
+
+        .view-container.active {
+            display: block;
+        }
+
+        /* Stats Overview */
+        .stats-overview {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            transition: all 0.3s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--card-shadow);
+        }
+
+        .stat-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+
+        .stat-icon.blue { background: rgba(59, 130, 246, 0.15); }
+        .stat-icon.green { background: rgba(16, 185, 129, 0.15); }
+        .stat-icon.amber { background: rgba(245, 158, 11, 0.15); }
+        .stat-icon.red { background: rgba(239, 68, 68, 0.15); }
+        .stat-icon.purple { background: rgba(139, 92, 246, 0.15); }
+        .stat-icon.cyan { background: rgba(6, 182, 212, 0.15); }
+
+        .stat-info h3 {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 2px;
+        }
+
+        .stat-info p {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        /* Section Title */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title::before {
+            content: '';
+            width: 4px;
+            height: 18px;
+            background: linear-gradient(180deg, var(--accent-blue), var(--accent-purple));
+            border-radius: 2px;
+        }
+
+        /* Project Grid */
+        .project-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            gap: 20px;
+        }
+
+        .project-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 20px;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .project-card:hover {
+            transform: translateY(-4px);
+            box-shadow: var(--card-shadow);
+            border-color: var(--accent-blue);
+        }
+
+        .project-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .project-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .project-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        .project-badge {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        .project-badge.planning {
+            background: rgba(59, 130, 246, 0.15);
+            color: var(--accent-blue);
+        }
+
+        .project-badge.active {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--accent-green);
+        }
+
+        .project-badge.paused {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--accent-amber);
+        }
+
+        .project-stats-row {
+            display: flex;
+            gap: 16px;
+            margin: 16px 0;
+            padding: 12px 0;
+            border-top: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .project-stat {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .project-stat-value {
+            font-weight: 600;
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .project-team {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .team-avatars {
+            display: flex;
+        }
+
+        .team-avatar {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent-purple), var(--accent-cyan));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            margin-left: -8px;
+            border: 2px solid var(--bg-card);
+        }
+
+        .team-avatar:first-child {
+            margin-left: 0;
+        }
+
+        .team-more {
+            font-size: 11px;
+            color: var(--text-muted);
+            padding-left: 4px;
+        }
+
+        /* Employee Workload */
+        .employee-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 16px;
+        }
+
+        .employee-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            transition: all 0.3s;
+        }
+
+        .employee-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--card-shadow);
+        }
+
+        .employee-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .employee-avatar-lg {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--accent-purple), var(--accent-cyan));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .employee-info {
+            flex: 1;
+        }
+
+        .employee-name {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .employee-role {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .employee-status {
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 10px;
+            font-weight: 500;
+        }
+
+        .employee-status.idle {
+            background: rgba(148, 163, 184, 0.15);
+            color: var(--text-secondary);
+        }
+
+        .employee-status.working {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--accent-green);
+        }
+
+        .employee-status.busy {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--accent-amber);
+        }
+
+        .employee-tasks {
+            margin-top: 12px;
+        }
+
+        .task-item-mini {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px;
+            background: var(--bg-secondary);
+            border-radius: 6px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .task-status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .task-status-dot.pending { background: var(--accent-amber); }
+        .task-status-dot.in_progress { background: var(--accent-blue); }
+        .task-status-dot.completed { background: var(--accent-green); }
+
+        .task-title-mini {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* Task Kanban */
+        .kanban-board {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            overflow-x: auto;
+        }
+
+        .kanban-column {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 16px;
+            min-height: 400px;
+        }
+
+        .kanban-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .kanban-title {
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .kanban-count {
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .kanban-count.pending {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--accent-amber);
+        }
+
+        .kanban-count.in_progress {
+            background: rgba(59, 130, 246, 0.2);
+            color: var(--accent-blue);
+        }
+
+        .kanban-count.completed {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--accent-green);
+        }
+
+        .kanban-count.review {
+            background: rgba(139, 92, 246, 0.2);
+            color: var(--accent-purple);
+        }
+
+        .kanban-tasks {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .kanban-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .kanban-card:hover {
+            border-color: var(--accent-blue);
+        }
+
+        .kanban-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 8px;
+        }
+
+        .kanban-title {
+            font-size: 13px;
+            font-weight: 500;
+            line-height: 1.4;
+        }
+
+        .kanban-priority {
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 500;
+        }
+
+        .kanban-priority.high {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--accent-red);
+        }
+
+        .kanban-priority.medium {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--accent-amber);
+        }
+
+        .kanban-priority.low {
+            background: rgba(139, 157, 181, 0.15);
+            color: var(--text-muted);
+        }
+
+        .kanban-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .kanban-assignee {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .kanban-project {
+            font-size: 10px;
+            color: var(--text-muted);
+            padding: 2px 6px;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+        }
+
+        /* Activity Feed */
+        .activity-feed {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .activity-item {
+            display: flex;
+            gap: 16px;
+            padding: 16px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .activity-item:last-child {
+            border-bottom: none;
+        }
+
+        .activity-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+
+        .activity-content {
+            flex: 1;
+        }
+
+        .activity-title {
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .activity-meta {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .empty-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        .empty-text {
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(10px);
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+        }
+
+        .modal-overlay.open {
+            display: flex;
+        }
+
+        .modal-content {
+            background: var(--bg-card);
+            border-radius: 16px;
+            max-width: 800px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--card-shadow);
+        }
+
+        .modal-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-title {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .modal-close:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .modal-body {
+            padding: 24px;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header {
+                padding: 12px 16px;
+                flex-wrap: wrap;
+                gap: 12px;
+            }
+
+            .view-tabs {
+                order: 3;
+                width: 100%;
+                justify-content: center;
+            }
+
+            .main-container {
+                padding: 16px;
+            }
+
+            .kanban-board {
+                grid-template-columns: 1fr;
+            }
+
+            .stats-overview {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+        }
+
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Animations */
+        .fade-in {
+            animation: fadeIn 0.4s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="logo">
+            <div class="logo-icon">🚀</div>
+            <div>
+                <div class="logo-text">Nova Platform</div>
+                <div class="logo-sub">AI协作看板</div>
+            </div>
+        </div>
+
+        <div class="view-tabs">
+            <button class="view-tab active" data-view="overview">📊 概览</button>
+            <button class="view-tab" data-view="projects">📁 项目</button>
+            <button class="view-tab" data-view="employees">🤖 团队</button>
+            <button class="view-tab" data-view="tasks">✅ 任务</button>
+        </div>
+
+        <div class="header-actions">
+            <button class="btn" onclick="refreshData()">🔄 刷新</button>
+            <button class="btn btn-primary" onclick="openOffice()">🏢 办公室</button>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <!-- Overview View -->
+        <div id="overview-view" class="view-container active">
+            <div class="stats-overview" id="stats-overview">
+                <div class="loading"><div class="loading-spinner"></div></div>
+            </div>
+
+            <div class="section-header">
+                <h2 class="section-title">📁 项目概览</h2>
+            </div>
+            <div id="projects-overview" class="project-grid">
+                <div class="loading"><div class="loading-spinner"></div></div>
+            </div>
+
+            <div class="section-header" style="margin-top: 32px;">
+                <h2 class="section-title">⚡ 最近活动</h2>
+            </div>
+            <div id="activity-feed" class="activity-feed">
+                <div class="loading"><div class="loading-spinner"></div></div>
+            </div>
+        </div>
+
+        <!-- Projects View -->
+        <div id="projects-view" class="view-container">
+            <div class="section-header">
+                <h2 class="section-title">📁 项目列表</h2>
+                <button class="btn btn-primary" onclick="showCreateProject()">+ 新建项目</button>
+            </div>
+            <div id="projects-full" class="project-grid">
+                <div class="loading"><div class="loading-spinner"></div></div>
+            </div>
+        </div>
+
+        <!-- Employees View -->
+        <div id="employees-view" class="view-container">
+            <div class="section-header">
+                <h2 class="section-title">🤖 AI团队工作状态</h2>
+            </div>
+            <div id="employees-full" class="employee-grid">
+                <div class="loading"><div class="loading-spinner"></div></div>
+            </div>
+        </div>
+
+        <!-- Tasks View -->
+        <div id="tasks-view" class="view-container">
+            <div class="section-header">
+                <h2 class="section-title">✅ 任务看板</h2>
+            </div>
+            <div id="tasks-full" class="kanban-board">
+                <div class="loading"><div class="loading-spinner"></div></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Modal -->
+    <div id="modal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modal-title">详情</h2>
+                <button class="modal-close" onclick="closeModal()">×</button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <!-- Dynamic content -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // View switching
+        function switchView(viewName) {
+            document.querySelectorAll('.view-container').forEach(v => v.classList.remove('active'));
+            document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
+
+            document.getElementById(viewName + '-view').classList.add('active');
+            document.querySelector(`[data-view="${viewName}"]`).classList.add('active');
+        }
+
+        document.querySelectorAll('.view-tab').forEach(tab => {
+            tab.addEventListener('click', () => switchView(tab.dataset.view));
+        });
+
+        // Open office view
+        function openOffice() {
+            window.open('/', '_blank');
+        }
+
+        // Modal functions
+        function closeModal() {
+            document.getElementById('modal').classList.remove('open');
+        }
+
+        document.getElementById('modal').addEventListener('click', (e) => {
+            if (e.target.id === 'modal') closeModal();
+        });
+
+        // Render functions
+        function renderStatsOverview(data) {
+            const container = document.getElementById('stats-overview');
+            container.innerHTML = `
+                <div class="stat-card fade-in">
+                    <div class="stat-icon blue">📁</div>
+                    <div class="stat-info">
+                        <h3>${data.total_projects}</h3>
+                        <p>项目总数</p>
+                    </div>
+                </div>
+                <div class="stat-card purple">
+                    <div class="stat-icon purple">🤖</div>
+                    <div class="stat-info">
+                        <h3>${data.total_employees}</h3>
+                        <p>AI 员工</p>
+                    </div>
+                </div>
+                <div class="stat-card amber">
+                    <div class="stat-icon amber">📋</div>
+                    <div class="stat-info">
+                        <h3>${data.total_todos}</h3>
+                        <p>任务总数</p>
+                    </div>
+                </div>
+                <div class="stat-card green">
+                    <div class="stat-icon green">✅</div>
+                    <div class="stat-info">
+                        <h3>${data.todos_completed}</h3>
+                        <p>已完成</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderProjectCard(project) {
+            const statusBadge = {
+                'planning': 'planning',
+                'active': 'active',
+                'paused': 'paused'
+            }[project.status] || 'planning';
+
+            return `
+                <div class="project-card fade-in" onclick="openProjectDetail('${project.id}')">
+                    <div class="project-header">
+                        <div>
+                            <div class="project-title">${project.name}</div>
+                            <div class="project-desc">${project.description || '暂无描述'}</div>
+                        </div>
+                        <span class="project-badge ${statusBadge}">${getStatusLabel(project.status)}</span>
+                    </div>
+
+                    <div class="project-stats-row">
+                        <div class="project-stat">
+                            <span>📋</span>
+                            <span class="project-stat-value">${project.stats.total}</span>
+                        </div>
+                        <div class="project-stat">
+                            <span>⚡</span>
+                            <span class="project-stat-value">${project.stats.in_progress}</span>
+                        </div>
+                        <div class="project-stat">
+                            <span>✅</span>
+                            <span class="project-stat-value">${project.stats.completed}</span>
+                        </div>
+                    </div>
+
+                    <div class="project-team">
+                        <span style="font-size: 12px; color: var(--text-muted);">成员:</span>
+                        <div class="team-avatars">
+                            ${project.members.slice(0, 4).map(m => `<div class="team-avatar" title="${m.name}">🤖</div>`).join('')}
+                        </div>
+                        ${project.members.length > 4 ? `<span class="team-more">+${project.members.length - 4}</span>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        function getStatusLabel(status) {
+            const labels = {
+                'planning': '规划中',
+                'active': '进行中',
+                'paused': '暂停'
+            };
+            return labels[status] || status;
+        }
+
+        function renderEmployeeCard(employee) {
+            const activeTaskCount = employee.todos.filter(t => t.status === 'in_progress').length;
+            let statusClass = 'idle';
+            let statusText = '空闲';
+
+            if (activeTaskCount > 0) {
+                statusClass = 'working';
+                statusText = '工作中';
+            } else if (employee.todos.length > 2) {
+                statusClass = 'busy';
+                statusText = '繁忙';
+            }
+
+            return `
+                <div class="employee-card fade-in">
+                    <div class="employee-header">
+                        <div class="employee-avatar-lg">🤖</div>
+                        <div class="employee-info">
+                            <div class="employee-name">${employee.name}</div>
+                            <div class="employee-role">${employee.role || 'AI助手'}</div>
+                        </div>
+                        <span class="employee-status ${statusClass}">${statusText}</span>
+                    </div>
+                    <div class="employee-tasks">
+                        ${employee.todos.slice(0, 3).map(task => `
+                            <div class="task-item-mini">
+                                <div class="task-status-dot ${task.status}"></div>
+                                <span class="task-title-mini">${task.title}</span>
+                            </div>
+                        `).join('')}
+                        ${employee.todos.length === 0 ? '<div style="font-size: 11px; color: var(--text-muted);">暂无任务</div>' : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderKanbanBoard(todos) {
+            const columns = [
+                { id: 'pending', title: '待处理', icon: '⏳' },
+                { id: 'in_progress', title: '进行中', icon: '🚀' },
+                { id: 'review', title: '审核中', icon: '👀️' },
+                { id: 'completed', title: '已完成', icon: '✅' }
+            ];
+
+            const container = document.getElementById('tasks-full');
+            container.innerHTML = columns.map(col => {
+                const columnTodos = todos.filter(t => t.status === col.id);
+                return `
+                    <div class="kanban-column">
+                        <div class="kanban-header">
+                            <div class="kanban-title">${col.icon} ${col.title}</div>
+                            <span class="kanban-count ${col.id}">${columnTodos.length}</span>
+                        </div>
+                        <div class="kanban-tasks">
+                            ${columnTodos.map(todo => renderKanbanCard(todo)).join('')}
+                            ${columnTodos.length === 0 ? '<div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 20px;">暂无任务</div>' : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderKanbanCard(todo) {
+            const priorityClass = todo.priority || 'medium';
+            return `
+                <div class="kanban-card" onclick="openTaskDetail('${todo.id}')">
+                    <div class="kanban-card-header">
+                        <div class="kanban-title">${todo.title}</div>
+                        <span class="kanban-priority ${priorityClass}">${todo.priority}</span>
+                    </div>
+                    <div class="kanban-meta">
+                        <div class="kanban-assignee">
+                            <span>🤖</span>
+                            <span>${todo.assignee || '未分配'}</span>
+                        </div>
+                        <div class="kanban-project">${todo.project_name || '无项目'}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Data loading
+        async function refreshData() {
+            try {
+                const [statsRes, projectsRes, employeesRes, todosRes] = await Promise.all([
+                    fetch('/api/stats'),
+                    fetch('/api/projects'),
+                    fetch('/api/employees'),
+                    fetch('/api/todos')
+                ]);
+
+                const stats = await statsRes.json();
+                const projects = await projectsRes.json();
+                const employees = await employeesRes.json();
+                const todos = await todosRes.json();
+
+                // Update all views
+                renderStatsOverview(stats);
+                renderProjectsView(projects);
+                renderEmployeesView(employees);
+                renderTasksView(todos, projects);
+                renderActivityFeed(todos, employees, projects);
+
+            } catch (error) {
+                console.error('加载数据失败:', error);
+            }
+        }
+
+        function renderProjectsView(projects) {
+            const container = document.getElementById('projects-full');
+            if (projects.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon">📁</div>
+                        <div class="empty-text">暂无项目</div>
+                    </div>
+                `;
+                return;
+            }
+            container.innerHTML = projects.map(p => renderProjectCard(p)).join('');
+        }
+
+        function renderEmployeesView(employees) {
+            const container = document.getElementById('employees-full');
+            container.innerHTML = employees.map(e => renderEmployeeCard(e)).join('');
+        }
+
+        function renderTasksView(todos, projects) {
+            // Add project names to todos
+            const todosWithProject = todos.map(todo => ({
+                ...todo,
+                project_name: projects.find(p => p.id === todo.project_id)?.name || '未知项目'
+            }));
+            renderKanbanBoard(todosWithProject);
+        }
+
+        function renderActivityFeed(todos, employees, projects) {
+            const container = document.getElementById('activity-feed');
+
+            // Create activity items from todos
+            const activities = [];
+
+            employees.forEach(emp => {
+                emp.todos.slice(0, 2).forEach(todo => {
+                    activities.push({
+                        icon: '🤖',
+                        title: `${emp.name} 正在处理 "${todo.title}"`,
+                        meta: `${getTimeAgo(todo.updated_at)} · ${projects.find(p => p.id === todo.project_id)?.name || ''}`,
+                        type: 'task'
+                    });
+                });
+            });
+
+            if (activities.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon">📭</div>
+                        <div class="empty-text">暂无活动</div>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = activities.slice(0, 5).map(activity => `
+                <div class="activity-item">
+                    <div class="activity-icon">${activity.icon}</div>
+                    <div class="activity-content">
+                        <div class="activity-title">${activity.title}</div>
+                        <div class="activity-meta">${activity.meta}</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function getTimeAgo(dateString) {
+            const date = new Date(dateString);
+            const now = new Date();
+            const diff = Math.floor((now - date) / 1000 / 60); // minutes
+
+            if (diff < 1) return '刚刚';
+            if (diff < 60) return `${diff}分钟前`;
+            if (diff < 1440) return `${Math.floor(diff / 60)}小时前`;
+            return `${Math.floor(diff / 1440)}天前`;
+        }
+
+        // Modal functions
+        async function openProjectDetail(projectId) {
+            const response = await fetch(`/api/project/${projectId}`);
+            const project = await response.json();
+
+            if (project.error) {
+                alert('项目不存在');
+                return;
+            }
+
+            document.getElementById('modal-title').textContent = project.name;
+            document.getElementById('modal-body').innerHTML = `
+                <div style="margin-bottom: 24px;">
+                    <h3 style="margin-bottom: 12px; color: var(--accent-blue);">📖 项目描述</h3>
+                    <p style="color: var(--text-secondary); line-height: 1.6;">${project.description || '暂无描述'}</p>
+                </div>
+
+                <div style="margin-bottom: 24px;">
+                    <h3 style="margin-bottom: 12px; color: var(--accent-green);">👥 团队成员</h3>
+                    <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+                        ${project.members.map(m => `
+                            <div style="padding: 12px 16px; background: var(--bg-secondary); border-radius: 8px; display: flex; align-items: center; gap: 8px;">
+                                <span style="font-size: 20px;">🤖</span>
+                                <span>${m.name}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+
+                <div>
+                    <h3 style="margin-bottom: 12px; color: var(--accent-amber);">📋 任务列表 (${project.todos.length})</h3>
+                    <div style="display: flex; flex-direction: column; gap: 12px;">
+                        ${project.todos.map(t => `
+                            <div style="padding: 16px; background: var(--bg-secondary); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
+                                <div style="width: 8px; height: 8px; border-radius: 50%; background: ${getStatusColor(t.status)};"></div>
+                                <div style="flex: 1;">
+                                    <div style="font-weight: 500;">${t.title}</div>
+                                    <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
+                                        ${t.assignee ? `🤖 ${t.assignee}` : '未分配'} · ${t.priority} 优先级
+                                    </div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('modal').classList.add('open');
+        }
+
+        async function openTaskDetail(todoId) {
+            try {
+                const response = await fetch(`/api/todo/${todoId}`);
+                const todo = await response.json();
+
+                if (todo.error) {
+                    alert('任务不存在');
+                    return;
+                }
+
+                const statusLabel = {
+                    'pending': '待处理',
+                    'in_progress': '进行中',
+                    'completed': '已完成',
+                    'review': '审核中'
+                };
+
+                const statusClass = {
+                    'pending': 'amber',
+                    'in_progress': 'blue',
+                    'completed': 'green',
+                    'review': 'purple'
+                };
+
+                document.getElementById('modal-title').textContent = todo.title;
+                document.getElementById('modal-body').innerHTML = `
+                    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 24px;">
+                        <div>
+                            <!-- 基本信息 -->
+                            <div style="margin-bottom: 24px;">
+                                <h3 style="margin-bottom: 12px; color: var(--accent-blue); font-size: 14px;">📋 基本信息</h3>
+                                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+                                    <div style="padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                                        <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px;">状态</div>
+                                        <div style="font-weight: 500; color: var(--accent-${statusClass[todo.status] || 'blue'});">${statusLabel[todo.status] || todo.status}</div>
+                                    </div>
+                                    <div style="padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                                        <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px;">优先级</div>
+                                        <div style="font-weight: 500; text-transform: capitalize;">${todo.priority}</div>
+                                    </div>
+                                    <div style="padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                                        <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px;">所属项目</div>
+                                        <div style="font-weight: 500;">${todo.project_name}</div>
+                                    </div>
+                                    <div style="padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                                        <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px;">创建时间</div>
+                                        <div style="font-weight: 500; font-size: 13px;">${todo.created_at}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 工作总结 -->
+                            ${todo.work_summary ? `
+                                <div style="margin-bottom: 24px;">
+                                    <h3 style="margin-bottom: 12px; color: var(--accent-green); font-size: 14px;">📝 工作总结</h3>
+                                    <div style="padding: 16px; background: var(--bg-secondary); border-radius: 8px; border-left: 3px solid var(--accent-green);">
+                                        <div style="white-space: pre-wrap; line-height: 1.6; color: var(--text-primary); font-size: 13px;">${todo.work_summary}</div>
+                                    </div>
+                                    ${todo.completed_at ? `
+                                        <div style="margin-top: 8px; font-size: 11px; color: var(--text-muted);">
+                                            完成时间: ${todo.completed_at}
+                                        </div>
+                                    ` : ''}
+                                </div>
+                            ` : ''}
+
+                            <!-- 依赖关系 -->
+                            ${todo.dependencies && todo.dependencies.length > 0 ? `
+                                <div style="margin-bottom: 24px;">
+                                    <h3 style="margin-bottom: 12px; color: var(--accent-amber); font-size: 14px;">🔗 依赖任务</h3>
+                                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                                        ${todo.dependencies.map(dep => `
+                                            <div style="padding: 10px 12px; background: var(--bg-secondary); border-radius: 6px; display: flex; align-items: center; gap: 8px; font-size: 12px;">
+                                                <div style="width: 6px; height: 6px; border-radius: 50%; background: ${getStatusColor(dep.status)};"></div>
+                                                <span style="flex: 1;">${dep.title}</span>
+                                                <span style="color: var(--text-muted); font-size: 11px;">${statusLabel[dep.status] || dep.status}</span>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+
+                            ${todo.dependents && todo.dependents.length > 0 ? `
+                                <div style="margin-bottom: 24px;">
+                                    <h3 style="margin-bottom: 12px; color: var(--accent-purple); font-size: 14px;">👁 被依赖</h3>
+                                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                                        ${todo.dependents.map(dep => `
+                                            <div style="padding: 10px 12px; background: var(--bg-secondary); border-radius: 6px; display: flex; align-items: center; gap: 8px; font-size: 12px;">
+                                                <div style="width: 6px; height: 6px; border-radius: 50%; background: ${getStatusColor(dep.status)};"></div>
+                                                <span style="flex: 1;">${dep.title}</span>
+                                                <span style="color: var(--text-muted); font-size: 11px;">${statusLabel[dep.status] || dep.status}</span>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+
+                        <div>
+                            <!-- 执行者信息 -->
+                            <div style="margin-bottom: 24px;">
+                                <h3 style="margin-bottom: 12px; color: var(--accent-cyan); font-size: 14px;">🤖 执行者</h3>
+                                ${todo.assignee ? `
+                                    <div style="padding: 16px; background: var(--bg-secondary); border-radius: 8px;">
+                                        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+                                            <div style="width: 40px; height: 40px; border-radius: 8px; background: linear-gradient(135deg, var(--accent-purple), var(--accent-cyan)); display: flex; align-items: center; justify-content: center; font-size: 20px;">🤖</div>
+                                            <div>
+                                                <div style="font-weight: 600; font-size: 14px;">${todo.assignee}</div>
+                                                <div style="font-size: 11px; color: var(--text-muted);">${todo.assignee_type === 'openclaw' ? 'OpenClaw Agent' : todo.assignee_type === 'human' ? '人类' : 'AI Agent'}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ` : `
+                                    <div style="padding: 16px; background: var(--bg-secondary); border-radius: 8px; text-align: center; color: var(--text-muted); font-size: 13px;">
+                                        未分配执行者
+                                    </div>
+                                `}
+                            </div>
+
+                            <!-- 任务元数据 -->
+                            <div style="margin-bottom: 24px;">
+                                <h3 style="margin-bottom: 12px; color: var(--text-muted); font-size: 14px;">⚙️ 元数据</h3>
+                                <div style="display: flex; flex-direction: column; gap: 8px; font-size: 11px;">
+                                    ${todo.session_id ? `
+                                        <div style="padding: 8px 12px; background: var(--bg-secondary); border-radius: 6px; display: flex; justify-content: space-between;">
+                                            <span style="color: var(--text-muted);">Session ID</span>
+                                            <span style="font-family: 'JetBrains Mono', monospace;">${todo.session_id.slice(0, 20)}...</span>
+                                        </div>
+                                    ` : ''}
+                                    ${todo.process_id ? `
+                                        <div style="padding: 8px 12px; background: var(--bg-secondary); border-radius: 6px; display: flex; justify-content: space-between;">
+                                            <span style="color: var(--text-muted);">Process ID</span>
+                                            <span style="font-family: 'JetBrains Mono', monospace;">${todo.process_id}</span>
+                                        </div>
+                                    ` : ''}
+                                    <div style="padding: 8px 12px; background: var(--bg-secondary); border-radius: 6px; display: flex; justify-content: space-between;">
+                                        <span style="color: var(--text-muted);">更新时间</span>
+                                        <span>${todo.updated_at}</span>
+                                    </div>
+                                    ${todo.due_date ? `
+                                        <div style="padding: 8px 12px; background: var(--bg-secondary); border-radius: 6px; display: flex; justify-content: space-between;">
+                                            <span style="color: var(--text-muted);">截止日期</span>
+                                            <span>${todo.due_date}</span>
+                                        </div>
+                                    ` : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 操作按钮 -->
+                    <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-color); display: flex; gap: 12px;">
+                        ${todo.status === 'completed' ? `
+                            <button class="btn" onclick="closeModal()">关闭</button>
+                        ` : `
+                            <button class="btn" onclick="closeModal()">关闭</button>
+                            <button class="btn btn-primary" onclick="refreshTodoDetail('${todo.id}')">刷新状态</button>
+                        `}
+                    </div>
+                `;
+
+                document.getElementById('modal').classList.add('open');
+            } catch (error) {
+                console.error('加载任务详情失败:', error);
+                alert('加载任务详情失败');
+            }
+        }
+
+        async function refreshTodoDetail(todoId) {
+            // 关闭当前modal并重新打开以刷新数据
+            closeModal();
+            setTimeout(() => openTaskDetail(todoId), 100);
+            // 同时刷新整个看板数据
+            refreshData();
+        }
+
+        function showCreateProject() {
+            alert('新建项目功能开发中...');
+        }
+
+        function getStatusColor(status) {
+            const colors = {
+                'pending': '#f59e0b',
+                'in_progress': '#3b82f6',
+                'completed': '#10b981',
+                'review': '#8b5cf6'
+            };
+            return colors[status] || '#5c6d84';
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', refreshData);
+
+        // Auto refresh every 30 seconds
+        setInterval(refreshData, 30000);
+    </script>
+</body>
+</html>

@@ -7,7 +7,7 @@ import fcntl
 from datetime import datetime
 from nova_platform.database import get_session, init_db
 from nova_platform.services import project_service, employee_service, todo_service, agent_service, automation_service
-from nova_platform.models import Todo
+from nova_platform.models import Todo, Project
 from nova_platform.config import load_config, get_config, get_server_config, get_env, is_production
 
 # PID file location
@@ -310,12 +310,25 @@ def project():
 @click.argument("name")
 @click.option("--description", default="", help="Project description")
 @click.option("--template", type=click.Choice(["software_dev", "content_ops", "general"]), default="general", help="Project template")
-def project_create(session, name, description, template):
+@click.option("--leader", "leader_id", help="Employee ID to assign as project leader")
+@click.option("--workspace", "workspace_path", help="Custom workspace path (default: ~/.nova/workspaces/<project_id>)")
+def project_create(session, name, description, template, leader_id, workspace_path):
     """Create a new project."""
     session = session["session"]
-    proj = project_service.create_project(session, name, description, template)
+    from nova_platform.services import project_member_service
+
+    proj = project_service.create_project(session, name, description, template, workspace_path)
     click.echo(click.style(f"Created project: ", fg="green") + click.style(proj.name, bold=True))
     click.echo(f"ID: {proj.id}")
+    click.echo(f"Workspace: {proj.workspace_path}")
+
+    # 如果指定了 leader，添加到项目
+    if leader_id:
+        result = project_member_service.add_member_to_project(session, proj.id, leader_id, role="leader")
+        if result["success"]:
+            click.echo(f"Leader assigned: {leader_id[:8]}")
+        else:
+            click.echo(click.style(f"Warning: Failed to assign leader - {result['error']}", fg="yellow"))
 
 
 @project.command(name="list")
@@ -329,7 +342,7 @@ def project_list(session):
         return
     for p in projects:
         status_color = {"planning": "yellow", "active": "green", "completed": "blue", "paused": "red"}.get(p.status, "white")
-        click.echo(f"{p.id[:8]}  {click.style(p.status.upper(), fg=status_color):10}  {p.name}")
+        click.echo(f"{p.id}  {click.style(p.status.upper(), fg=status_color):10}  {p.name}")
 
 
 @project.command(name="view")
@@ -349,6 +362,7 @@ def project_view(session, project_id):
     click.echo(f"Template:    {proj.template}")
     click.echo(f"Status:      {proj.status}")
     click.echo(f"Created:     {proj.created_at.strftime('%Y-%m-%d %H:%M')}")
+    click.echo(f"Workspace:   {proj.workspace_path or 'Not set'}")
     members = project_service.get_project_members(session, project_id)
     if members:
         click.echo(f"Members:     {', '.join(m.name for m in members)}")
@@ -368,6 +382,99 @@ def project_update(session, project_id, status):
     click.echo(click.style(f"Updated project: ", fg="green") + proj.name)
 
 
+@project.command(name="set-workspace")
+@click.pass_obj
+@click.argument("project_id")
+@click.argument("workspace_path")
+def project_set_workspace(session, project_id, workspace_path):
+    """Set project workspace path."""
+    session = session["session"]
+    if project_service.set_project_workspace(session, project_id, workspace_path):
+        proj = project_service.get_project(session, project_id)
+        click.echo(click.style(f"Workspace set: ", fg="green") + proj.workspace_path)
+        click.echo(f"Directory structure created at: {workspace_path}")
+    else:
+        click.echo(click.style(f"Project not found: {project_id}", fg="red"), err=True)
+
+
+@project.command(name="logs")
+@click.pass_obj
+@click.argument("project_id")
+@click.option("--lines", "-n", default=100, type=int, help="Number of log lines to show")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output (like tail -f)")
+@click.option("--clear", is_flag=True, help="Clear project logs")
+def project_logs(session, project_id, lines, follow, clear):
+    """Show project automation logs."""
+    from nova_platform.services import project_log_service
+
+    if clear:
+        if project_log_service.clear_project_logs(project_id):
+            click.echo(click.style("Logs cleared.", fg="green"))
+        else:
+            click.echo(click.style("Failed to clear logs.", fg="red"), err=True)
+        return
+
+    # 验证项目存在
+    proj = project_service.get_project(session["session"], project_id)
+    if not proj:
+        click.echo(click.style(f"Project not found: {project_id}", fg="red"), err=True)
+        return
+
+    if follow:
+        # 实时跟踪模式
+        click.echo(click.style(f"=== Following logs for {proj.name} (Ctrl+C to exit) ===", fg="cyan"))
+        click.echo("")
+
+        def print_line(line):
+            # 简单的颜色标记
+            if "[ERROR]" in line:
+                click.echo(click.style(line, fg="red"))
+            elif "[CYCLE]" in line:
+                click.echo(click.style(line, fg="cyan"))
+            elif "[ACTION]" in line:
+                click.echo(click.style(line, fg="yellow"))
+            elif "[LEADER]" in line:
+                click.echo(click.style(line, fg="green"))
+            else:
+                click.echo(line)
+
+        try:
+            for line in project_log_service.follow_project_logs(project_id):
+                print_line(line)
+        except KeyboardInterrupt:
+            click.echo("\n" + click.style("=== Stopped following ===", fg="cyan"))
+    else:
+        # 显示最近日志
+        logs = project_log_service.get_project_logs(project_id, lines)
+
+        if not logs:
+            click.echo("No logs found for this project.")
+            return
+
+        # 显示日志统计
+        stats = project_log_service.get_project_log_stats(project_id)
+        if stats.get("exists"):
+            click.echo(click.style(f"=== {proj.name} Logs ===", fg="cyan", bold=True))
+            click.echo(f"Total: {stats['lines']} lines | Size: {stats['size_bytes']} bytes")
+            if stats.get("event_counts"):
+                counts = ", ".join(f"{k}: {v}" for k, v in stats["event_counts"].items())
+                click.echo(f"Events: {counts}")
+            click.echo("")
+
+        # 显示日志内容
+        for line in logs:
+            if "[ERROR]" in line:
+                click.echo(click.style(line.rstrip(), fg="red"))
+            elif "[CYCLE]" in line:
+                click.echo(click.style(line.rstrip(), fg="cyan"))
+            elif "[ACTION]" in line:
+                click.echo(click.style(line.rstrip(), fg="yellow"))
+            elif "[LEADER]" in line:
+                click.echo(click.style(line.rstrip(), fg="green"))
+            else:
+                click.echo(line.rstrip())
+
+
 @project.command(name="delete")
 @click.pass_obj
 @click.argument("project_id")
@@ -378,6 +485,249 @@ def project_delete(session, project_id):
         click.echo(click.style(f"Deleted project: {project_id}", fg="green"))
     else:
         click.echo(click.style(f"Project not found: {project_id}", fg="red"), err=True)
+
+
+# Project control subcommands
+@project.group(name="control")
+def project_control():
+    """Project control commands (pause/resume)."""
+    pass
+
+
+@project_control.command(name="pause")
+@click.pass_obj
+@click.argument("project_id")
+def project_control_pause(session, project_id):
+    """Pause a project - stop all running agents and save state."""
+    session = session["session"]
+    from nova_platform.services import project_control_service
+
+    result = project_control_service.pause_project(session, project_id)
+
+    if result["success"]:
+        click.echo(click.style(f"Project paused: ", fg="yellow") + click.style(result["message"], bold=True))
+        if result["paused_todos"] > 0:
+            click.echo(f"  Paused tasks: {result['paused_todos']}")
+            click.echo(f"  Cancelled agents: {result['cancelled_tasks']}")
+    else:
+        click.echo(click.style(f"Failed: {result['message']}", fg="red"), err=True)
+
+
+@project_control.command(name="resume")
+@click.pass_obj
+@click.argument("project_id")
+def project_control_resume(session, project_id):
+    """Resume a paused project - restore task states."""
+    session = session["session"]
+    from nova_platform.services import project_control_service
+
+    result = project_control_service.resume_project(session, project_id)
+
+    if result["success"]:
+        click.echo(click.style(f"Project resumed: ", fg="green") + click.style(result["message"], bold=True))
+        if result["resumed_todos"] > 0:
+            click.echo(f"  Restored tasks: {result['resumed_todos']}")
+            click.echo(click.style("  Tasks are now pending and will be reassigned.", fg="cyan"))
+    else:
+        click.echo(click.style(f"Failed: {result['message']}", fg="red"), err=True)
+
+
+@project_control.command(name="status")
+@click.pass_obj
+@click.argument("project_id")
+def project_control_status(session, project_id):
+    """Show project control status."""
+    session = session["session"]
+    from nova_platform.services import project_control_service
+
+    status = project_control_service.get_project_control_status(session, project_id)
+
+    if not status.get("success"):
+        click.echo(click.style(f"Error: {status.get('error', 'Unknown error')}", fg="red"), err=True)
+        return
+
+    proj = session.query(Project).filter_by(id=project_id).first()
+    click.echo(click.style("Project Control Status", bold=True))
+    click.echo("-" * 50)
+    click.echo(f"Project: {proj.name if proj else project_id[:8]}")
+    click.echo(f"Status: {click.style(status['status'].upper(), fg='yellow' if status['status'] == 'paused' else 'green')}")
+    click.echo()
+    click.echo(f"Paused tasks: {status['paused_todos']}")
+    click.echo(f"In-progress tasks: {status['in_progress_todos']}")
+    click.echo(f"Running agents: {status['running_agents']}")
+    click.echo()
+    if status['can_pause']:
+        click.echo(click.style("Can pause: Yes", fg="green"))
+    else:
+        click.echo("Can pause: No")
+    if status['can_resume']:
+        click.echo(click.style("Can resume: Yes", fg="green"))
+    else:
+        click.echo("Can resume: No")
+
+
+@project_control.command(name="force-stop")
+@click.pass_obj
+@click.argument("project_id")
+@click.option("--confirm", is_flag=True, help="Confirm force stop without prompt")
+def project_control_force_stop(session, project_id, confirm):
+    """Force stop a project - reset all tasks without saving state."""
+    session = session["session"]
+    from nova_platform.services import project_control_service
+
+    if not confirm:
+        if not click.confirm(click.style("This will reset all tasks without saving state. Continue?", fg="red")):
+            click.echo("Cancelled.")
+            return
+
+    result = project_control_service.force_stop_project(session, project_id)
+
+    if result["success"]:
+        click.echo(click.style(f"Project force stopped: ", fg="red") + click.style(result["message"], bold=True))
+        click.echo(f"  Reset tasks: {result['stopped_todos']}")
+        click.echo(f"  Cancelled agents: {result['cancelled_tasks']}")
+        click.echo(click.style("  All tasks are now pending and need to be reassigned.", fg="cyan"))
+    else:
+        click.echo(click.style(f"Failed: {result['message']}", fg="red"), err=True)
+
+
+@project_control.command(name="list")
+@click.pass_obj
+def project_control_list(session):
+    """List all paused projects."""
+    session = session["session"]
+    from nova_platform.services import project_control_service
+
+    paused = project_control_service.list_paused_projects(session)
+
+    if not paused:
+        click.echo("No paused projects.")
+        return
+
+    click.echo(click.style(f"Paused Projects ({len(paused)})", bold=True))
+    click.echo("-" * 60)
+
+    for item in paused:
+        proj = item["project"]
+        click.echo(f"\n{click.style(proj.name, bold=True)} [{proj.id}]")
+        click.echo(f"  Paused tasks: {item['paused_todos']}")
+        click.echo(f"  Paused at: {item['paused_at'].strftime('%Y-%m-%d %H:%M')}")
+
+
+# Project member subcommands
+@project.group(name="member")
+def project_member():
+    """Project member management commands."""
+    pass
+
+
+@project_member.command(name="add")
+@click.pass_obj
+@click.argument("project_id")
+@click.argument("employee_id")
+@click.option("--role", type=click.Choice(["leader", "member", "reviewer"]), default="member", help="Member role in project")
+def project_member_add(session, project_id, employee_id, role):
+    """Add an employee to a project."""
+    session = session["session"]
+    from nova_platform.services import project_member_service
+
+    result = project_member_service.add_member_to_project(session, project_id, employee_id, role)
+
+    if result["success"]:
+        member = result["member"]
+        click.echo(click.style(f"Added member to project: ", fg="green") + click.style(member.employee_id[:8], bold=True))
+        click.echo(f"Role: {role}")
+    else:
+        click.echo(click.style(f"Failed: {result['error']}", fg="red"), err=True)
+
+
+@project_member.command(name="remove")
+@click.pass_obj
+@click.argument("project_id")
+@click.argument("employee_id")
+def project_member_remove(session, project_id, employee_id):
+    """Remove a member from a project."""
+    session = session["session"]
+    from nova_platform.services import project_member_service
+
+    result = project_member_service.remove_member_from_project(session, project_id, employee_id)
+
+    if result["success"]:
+        click.echo(click.style(f"Removed member {employee_id[:8]} from project", fg="green"))
+    else:
+        click.echo(click.style(f"Failed: {result['error']}", fg="red"), err=True)
+
+
+@project_member.command(name="list")
+@click.pass_obj
+@click.argument("project_id")
+@click.option("--role", help="Filter by role")
+def project_member_list(session, project_id, role):
+    """List project members."""
+    session = session["session"]
+    from nova_platform.services import project_member_service
+
+    members = project_member_service.list_project_members(session, project_id, role)
+
+    if not members:
+        click.echo("No members found.")
+        return
+
+    proj = project_service.get_project(session, project_id)
+    click.echo(click.style(f"Project Members: {proj.name if proj else project_id[:8]}", bold=True))
+    click.echo("-" * 60)
+
+    for m in members:
+        emp = m["employee"]
+        role_icon = {"leader": "👑", "member": "👤", "reviewer": "👁"}.get(m["role"], "👤")
+        type_icon = {"human": "🧑", "agent": "🤖", "claude-code": "🤖", "openclaw": "🤖", "hermes": "🧠"}.get(emp.type, "❓")
+        click.echo(f"{role_icon} {type_icon} {emp.name} ({m['role']}) - {emp.type}")
+        click.echo(f"   ID: {emp.id}")
+        click.echo(f"   Joined: {m['joined_at'].strftime('%Y-%m-%d %H:%M')}")
+        if emp.skills:
+            import json
+            try:
+                skills = json.loads(emp.skills)
+                if skills:
+                    click.echo(f"   Skills: {', '.join(skills)}")
+            except:
+                pass
+        click.echo()
+
+
+@project_member.command(name="update-role")
+@click.pass_obj
+@click.argument("project_id")
+@click.argument("employee_id")
+@click.option("--role", type=click.Choice(["leader", "member", "reviewer"]), required=True, help="New role")
+def project_member_update_role(session, project_id, employee_id, role):
+    """Update a member's role in the project."""
+    session = session["session"]
+    from nova_platform.services import project_member_service
+
+    result = project_member_service.update_member_role(session, project_id, employee_id, role)
+
+    if result["success"]:
+        click.echo(click.style(f"Updated member role to: {role}", fg="green"))
+    else:
+        click.echo(click.style(f"Failed: {result['error']}", fg="red"), err=True)
+
+
+@project_member.command(name="transfer-ownership")
+@click.pass_obj
+@click.argument("project_id")
+@click.argument("new_leader_id")
+def project_member_transfer_ownership(session, project_id, new_leader_id):
+    """Transfer project ownership to another member."""
+    session = session["session"]
+    from nova_platform.services import project_member_service
+
+    result = project_member_service.transfer_project_ownership(session, project_id, new_leader_id)
+
+    if result["success"]:
+        click.echo(click.style(f"Transferred project ownership to {new_leader_id[:8]}", fg="green"))
+    else:
+        click.echo(click.style(f"Failed: {result['error']}", fg="red"), err=True)
 
 
 # Employee subcommands
@@ -425,7 +775,7 @@ def employee_list(session):
         click.echo("No employees found.")
         return
     for e in employees:
-        click.echo(f"{e.id[:8]}  {e.type:6}  {e.role:12}  {e.name}")
+        click.echo(f"{e.id}  {e.type:6}  {e.role:12}  {e.name}")
 
 
 @employee.command(name="view")
@@ -458,6 +808,40 @@ def employee_assign(session, employee_id, project_id):
         click.echo(click.style(f"Assigned employee {employee_id[:8]} to project {project_id[:8]}", fg="green"))
     else:
         click.echo(click.style("Project or employee not found", fg="red"), err=True)
+
+
+@employee.command(name="projects")
+@click.pass_obj
+@click.argument("employee_id")
+def employee_projects(session, employee_id):
+    """List all projects an employee is a member of."""
+    session = session["session"]
+    from nova_platform.services import project_member_service
+
+    emp = employee_service.get_employee(session, employee_id)
+    if not emp:
+        click.echo(click.style(f"Employee not found: {employee_id}", fg="red"), err=True)
+        return
+
+    memberships = project_member_service.get_employee_projects(session, employee_id)
+
+    if not memberships:
+        click.echo(f"{emp.name} is not a member of any projects.")
+        return
+
+    click.echo(click.style(f"Projects for {emp.name}:", bold=True))
+    click.echo("-" * 60)
+
+    for m in memberships:
+        proj = m["project"]
+        role_icon = {"leader": "👑", "member": "👤", "reviewer": "👁"}.get(m["role"], "👤")
+        status_color = {"planning": "yellow", "active": "green", "completed": "blue", "paused": "red"}.get(proj.status, "white")
+        click.echo(f"\n{role_icon} {click.style(proj.name, bold=True)} [{click.style(proj.status.upper(), fg=status_color)}]")
+        click.echo(f"   ID:      {proj.id}")
+        click.echo(f"   Role:    {m['role']}")
+        click.echo(f"   Joined:  {m['joined_at'].strftime('%Y-%m-%d %H:%M')}")
+        if proj.description:
+            click.echo(f"   Desc:    {proj.description[:60]}...")
 
 
 # Todo subcommands
@@ -504,7 +888,7 @@ def todo_list(session, project_id, assignee_id):
         priority_color = {"high": "red", "medium": "yellow", "low": "green"}.get(t.priority, "white")
         status_color = {"pending": "yellow", "in_progress": "blue", "completed": "green"}.get(t.status, "white")
         due_str = f" | Due: {t.due_date.strftime('%Y-%m-%d')}" if t.due_date else ""
-        click.echo(f"{t.id[:8]}  {click.style(t.status.upper(), fg=status_color):12}  {click.style(t.priority.upper(), fg=priority_color):6}  {t.title}{due_str}")
+        click.echo(f"{t.id}  {click.style(t.status.upper(), fg=status_color):12}  {click.style(t.priority.upper(), fg=priority_color):6}  {t.title}{due_str}")
 
 
 @todo.command(name="update")
@@ -608,11 +992,30 @@ def report(session, project_id):
 @click.option("--type", "agent_type", type=click.Choice(["openclaw", "hermes", "claude-code"]), default="openclaw", help="Agent type")
 @click.option("--role", default="worker", help="Agent role")
 @click.option("--skills", default="", help="Comma-separated skills")
+@click.option("--agent-id", "agent_id", default=None, help="OpenClaw agent ID (required for openclaw)")
+@click.option("--profile-name", "profile_name", default=None, help="Hermes profile name (required for hermes)")
 @click.option("--model", default=None, help="Model to use for this agent")
-def employee_recruit(session, name, agent_type, role, skills):
-    """Recruit a new agent (create + register)."""
+def employee_recruit(session, name, agent_type, role, skills, agent_id, profile_name, model):
+    """Recruit an existing agent (not create a new one)."""
     session = session["session"]
     skills_list = [s.strip() for s in skills.split(",") if s.strip()] if skills else []
+
+    # 参数验证
+    if agent_type == "openclaw" and not agent_id:
+        click.echo(click.style("Error: --agent-id is required for openclaw type", fg="red"), err=True)
+        click.echo("Use 'openclaw agents list' to see available agents")
+        return
+
+    if agent_type == "hermes" and not profile_name:
+        click.echo(click.style("Error: --profile-name is required for hermes type", fg="red"), err=True)
+        click.echo("Use 'hermes profile list' to see available profiles")
+        return
+
+    kwargs = {"model": model}
+    if agent_id:
+        kwargs["agent_id"] = agent_id
+    if profile_name:
+        kwargs["profile_name"] = profile_name
 
     result = agent_service.recruit_agent(
         session=session,
@@ -620,15 +1023,24 @@ def employee_recruit(session, name, agent_type, role, skills):
         agent_type=agent_type,
         role=role,
         skills=skills_list,
-        model=model
+        **kwargs
     )
 
     if result["success"]:
         emp = result["employee"]
         click.echo(click.style(f"Recruited agent: ", fg="green") + click.style(emp.name, bold=True))
-        click.echo(f"ID:       {emp.id}")
-        click.echo(f"Type:     {emp.type}")
-        click.echo(f"Agent ID: {emp.agent_id}")
+        click.echo(f"ID:        {emp.id}")
+        click.echo(f"Type:      {emp.type}")
+        click.echo(f"Agent ID:  {emp.agent_id}")
+        click.echo(f"Role:      {emp.role}")
+        if emp.skills:
+            import json
+            try:
+                skills_list = json.loads(emp.skills)
+                if skills_list:
+                    click.echo(f"Skills:    {', '.join(skills_list)}")
+            except:
+                pass
     else:
         click.echo(click.style(f"Failed to recruit agent: ", fg="red") + result.get("error", "Unknown error"), err=True)
 
@@ -650,6 +1062,73 @@ def employee_dispatch(session, employee_id, task, project_id):
             click.echo(f"\nOutput:\n{result['output'][:500]}")
     else:
         click.echo(click.style(f"Failed to dispatch task: ", fg="red") + result.get("error", "Unknown error"), err=True)
+
+
+@employee.command(name="list-available")
+@click.option("--type", "agent_type", type=click.Choice(["openclaw", "hermes", "all"]), default="all", help="Filter by agent type")
+def employee_list_available(agent_type):
+    """List available agents for recruitment."""
+    from nova_platform.services import agent_service
+
+    if agent_type in ["openclaw", "all"]:
+        click.echo(click.style("OpenClaw Agents:", bold=True, fg="cyan"))
+        click.echo("-" * 50)
+
+        # 获取 OpenClaw agent 列表
+        result = agent_service._run_command(["openclaw", "agents", "list", "--json"])
+
+        if result["success"]:
+            try:
+                import json
+                agents = json.loads(result["stdout"])
+                if agents:
+                    for agent in agents:
+                        click.echo(f"\n{click.style(agent.get('name', 'Unknown'), bold=True)}")
+                        click.echo(f"  ID:       {agent.get('id', 'N/A')}")
+                        if agent.get('description'):
+                            click.echo(f"  Desc:     {agent.get('description')}")
+                else:
+                    click.echo("  No OpenClaw agents found")
+            except json.JSONDecodeError:
+                click.echo("  Failed to parse agent list")
+        else:
+            click.echo(f"  Error: {result.get('stderr', 'Unknown error')}")
+
+    if agent_type in ["hermes", "all"]:
+        click.echo()
+        click.echo(click.style("Hermes Profiles:", bold=True, fg="cyan"))
+        click.echo("-" * 50)
+
+        # 获取 Hermes profile 列表
+        result = agent_service._run_command(["hermes", "profile", "list"])
+
+        if result["success"]:
+            profiles = result["stdout"].strip()
+            if profiles:
+                for line in profiles.split("\n"):
+                    line = line.strip()
+                    if line:
+                        click.echo(f"  {line}")
+            else:
+                click.echo("  No Hermes profiles found")
+        else:
+            click.echo(f"  Error: {result.get('stderr', 'Unknown error')}")
+
+    if agent_type in ["claude-code", "all"]:
+        click.echo()
+        click.echo(click.style("Claude Code:", bold=True, fg="cyan"))
+        click.echo("-" * 50)
+
+        # 检查 Claude Code 是否可用
+        verify_result = agent_service.verify_claude_code()
+        if verify_result["exists"]:
+            click.echo(f"  Status:   {click.style('Available', fg='green')}")
+            click.echo(f"  Version:  {verify_result.get('version', 'Unknown')}")
+            click.echo()
+            click.echo("  Use without --agent-id or --profile-name")
+        else:
+            click.echo(f"  Status:   {click.style('Not Available', fg='red')}")
+            click.echo(f"  Error:    {verify_result.get('error', 'Unknown error')}")
 
 
 # Project run/subcommand
@@ -764,7 +1243,7 @@ def knowledge_search(session, query, project_id):
     if results:
         click.echo(click.style(f"Found {len(results)} results:", fg="green"))
         for k in results:
-            click.echo(f"\n[{k.id[:8]}] {k.title}")
+            click.echo(f"\n[{k.id}] {k.title}")
             if k.tags:
                 click.echo(f"  Tags: {k.tags}")
             if k.content:
@@ -785,7 +1264,7 @@ def knowledge_list(session, project_id):
     if entries:
         click.echo(click.style(f"Knowledge entries ({len(entries)}):", fg="cyan"))
         for k in entries:
-            click.echo(f"\n[{k.id[:8]}] {k.title}")
+            click.echo(f"\n[{k.id}] {k.title}")
             if k.project_id:
                 click.echo(f"  Project: {k.project_id[:8]}")
             if k.tags:
@@ -864,7 +1343,7 @@ def okr_list(session, project_id):
 
         progress = (okr.current_value / okr.target_value * 100) if okr.target_value > 0 else 0
 
-        click.echo(f"\n[{okr.id[:8]}] {okr.objective}")
+        click.echo(f"\n[{okr.id}] {okr.objective}")
         click.echo(f"  进度: {okr.current_value}/{okr.target_value} {okr.unit} ({progress:.1f}%)")
         click.echo(f"  状态: {click.style(okr.status.upper(), fg=status_color)}")
         if okr.due_date:

@@ -9,19 +9,19 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from nova_platform.database import init_db, get_session
+from nova_platform.database import init_db, get_db_session
 from nova_platform.models import Todo, Employee
 from nova_platform.services.agent_service import (
     check_todo_agent_status,
-    check_agent_process_status,
-    _load_task_state
+    check_agent_process_status
 )
+from nova_platform.services import task_state_service
 
 
 def check_and_recover_stuck_tasks() -> dict:
     """
     检查所有 in_progress 的任务，恢复卡住的任务
-    
+
     Returns:
         {
             "checked": int,      # 检查的任务数
@@ -30,74 +30,71 @@ def check_and_recover_stuck_tasks() -> dict:
         }
     """
     init_db()
-    session = get_session()
-    
-    # 查找所有 in_progress 的任务
-    in_progress_todos = session.query(Todo).filter_by(status="in_progress").all()
-    
-    results = {
-        "checked": len(in_progress_todos),
-        "recovered": 0,
-        "details": []
-    }
-    
-    # 统一收集需要更新的操作
-    todos_to_update = []  # [(todo_id, new_status, new_assignee_id), ...]
-    
-    for todo in in_progress_todos:
-        detail = {
-            "todo_id": todo.id,
-            "title": todo.title,
-            "agent_task_id": todo.agent_task_id,
-            "action": None,
-            "message": None
+
+    with get_db_session() as session:
+        # 查找所有 in_progress 的任务
+        in_progress_todos = session.query(Todo).filter_by(status="in_progress").all()
+
+        results = {
+            "checked": len(in_progress_todos),
+            "recovered": 0,
+            "details": []
         }
-        
-        if todo.agent_task_id:
-            # 有 agent_task_id，使用 agent_service 检查（不 commit）
-            status_result = check_todo_agent_status(session, todo.id, auto_commit=False)
-            
-            if status_result.get("todo_updated"):
-                detail["action"] = "updated"
-                detail["message"] = status_result.get("message", f"Status changed to {status_result.get('status')}")
-                results["recovered"] += 1
-            else:
-                detail["action"] = "unchanged"
-                detail["message"] = f"Still {status_result.get('status')}"
-        else:
-            # 没有 agent_task_id，检查是否超时（比如超过 30 分钟）
-            if todo.updated_at:
-                elapsed = (datetime.utcnow() - todo.updated_at.replace(tzinfo=None)).total_seconds()
-                if elapsed > 1800:  # 30 分钟
-                    # 收集超时任务，稍后统一更新
-                    todos_to_update.append((todo.id, "pending", None))
-                    detail["action"] = "timeout_recovered"
-                    detail["message"] = f"Task timed out after {int(elapsed/60)} minutes"
+
+        # 统一收集需要更新的操作
+        todos_to_update = []  # [(todo_id, new_status, new_assignee_id), ...]
+
+        for todo in in_progress_todos:
+            detail = {
+                "todo_id": todo.id,
+                "title": todo.title,
+                "agent_task_id": todo.agent_task_id,
+                "action": None,
+                "message": None
+            }
+
+            if todo.agent_task_id:
+                # 有 agent_task_id，使用 agent_service 检查（不 commit）
+                status_result = check_todo_agent_status(session, todo.id, auto_commit=False)
+
+                if status_result.get("todo_updated"):
+                    detail["action"] = "updated"
+                    detail["message"] = status_result.get("message", f"Status changed to {status_result.get('status')}")
                     results["recovered"] += 1
                 else:
-                    detail["action"] = "waiting"
-                    detail["message"] = f"Waiting for {int(elapsed/60)} minutes"
-        
-        results["details"].append(detail)
-    
-    # 统一执行更新并 commit
-    for todo_id, new_status, new_assignee_id in todos_to_update:
-        todo = session.query(Todo).filter_by(id=todo_id).first()
-        if todo:
-            todo.status = new_status
-            todo.assignee_id = new_assignee_id
-            todo.updated_at = datetime.utcnow()
-    
-    if todos_to_update:
-        session.commit()
-    
-    return results
+                    detail["action"] = "unchanged"
+                    detail["message"] = f"Still {status_result.get('status')}"
+            else:
+                # 没有 agent_task_id，检查是否超时（比如超过 30 分钟）
+                if todo.updated_at:
+                    elapsed = (datetime.utcnow() - todo.updated_at.replace(tzinfo=None)).total_seconds()
+                    if elapsed > 1800:  # 30 分钟
+                        # 收集超时任务，稍后统一更新
+                        todos_to_update.append((todo.id, "pending", None))
+                        detail["action"] = "timeout_recovered"
+                        detail["message"] = f"Task timed out after {int(elapsed/60)} minutes"
+                        results["recovered"] += 1
+                    else:
+                        detail["action"] = "waiting"
+                        detail["message"] = f"Waiting for {int(elapsed/60)} minutes"
+
+            results["details"].append(detail)
+
+        # 统一执行更新并 commit
+        for todo_id, new_status, new_assignee_id in todos_to_update:
+            todo = session.query(Todo).filter_by(id=todo_id).first()
+            if todo:
+                todo.status = new_status
+                todo.assignee_id = new_assignee_id
+                todo.updated_at = datetime.utcnow()
+
+        return results
 
 
 def get_system_health() -> dict:
     """
     获取系统健康状态
-    
+
     Returns:
         {
             "employees_total": int,
@@ -109,35 +106,35 @@ def get_system_health() -> dict:
         }
     """
     init_db()
-    session = get_session()
-    
-    employees = session.query(Employee).all()
-    todos = session.query(Todo).all()
-    
-    pending = [t for t in todos if t.status == "pending"]
-    in_progress = [t for t in todos if t.status == "in_progress"]
-    completed = [t for t in todos if t.status == "completed"]
-    
-    # 检查卡住的任务（in_progress 但 agent 进程已结束）
-    stuck_count = 0
-    for todo in in_progress:
-        if todo.agent_task_id:
-            task_info = _load_task_state(todo.agent_task_id)
-            if task_info.get("status") == "running":
-                pid = task_info.get("pid")
-                if pid:
-                    status = check_agent_process_status(pid)
-                    if status in ("dead", "zombie"):
-                        stuck_count += 1
-    
-    return {
-        "employees_total": len(employees),
-        "employees_online": len(set(t.assignee_id for t in in_progress if t.assignee_id)),
-        "todos_pending": len(pending),
-        "todos_in_progress": len(in_progress),
-        "todos_completed": len(completed),
-        "stuck_tasks": stuck_count
-    }
+
+    with get_db_session() as session:
+        employees = session.query(Employee).all()
+        todos = session.query(Todo).all()
+
+        pending = [t for t in todos if t.status == "pending"]
+        in_progress = [t for t in todos if t.status == "in_progress"]
+        completed = [t for t in todos if t.status == "completed"]
+
+        # 检查卡住的任务（in_progress 但 agent 进程已结束）
+        stuck_count = 0
+        for todo in in_progress:
+            if todo.agent_task_id:
+                task_info = task_state_service.get_task_status(session, todo.agent_task_id)
+                if task_info.get("status") == "running":
+                    pid = task_info.get("pid")
+                    if pid:
+                        status = check_agent_process_status(pid)
+                        if status in ("dead", "zombie"):
+                            stuck_count += 1
+
+        return {
+            "employees_total": len(employees),
+            "employees_online": len(set(t.assignee_id for t in in_progress if t.assignee_id)),
+            "todos_pending": len(pending),
+            "todos_in_progress": len(in_progress),
+            "todos_completed": len(completed),
+            "stuck_tasks": stuck_count
+        }
 
 
 if __name__ == "__main__":

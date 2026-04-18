@@ -4,6 +4,7 @@ Nova Platform - Web Dashboard
 """
 
 from flask import Flask, jsonify, render_template, send_from_directory, request
+from datetime import datetime, timedelta, timezone
 import sys
 import os
 
@@ -12,14 +13,44 @@ sys.path.insert(0, os.path.dirname(__file__))
 from nova_platform.database import init_db, get_session
 from nova_platform.models import Project, Employee, ProjectMember, Todo
 from nova_platform.star_office import (
-    star_office_bp, STAR_OFFICE_STATIC,
+    load_state, save_state, load_agents_state, save_agents_state
+)
+
+# UTC+8 时间处理
+TZ_UTC8 = timezone(timedelta(hours=8))
+
+def to_utc8(dt):
+    """转换 datetime 为 UTC+8"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc).astimezone(TZ_UTC8)
+    return dt.astimezone(TZ_UTC8)
+
+def format_datetime(dt):
+    """格式化 datetime 为 UTC+8 字符串"""
+    if dt is None:
+        return None
+    return to_utc8(dt).strftime('%Y-%m-%d %H:%M')
+
+def format_date(dt):
+    """格式化日期为 UTC+8 字符串"""
+    if dt is None:
+        return None
+    return to_utc8(dt).strftime('%Y-%m-%d')
+
+from nova_platform.star_office import (
     load_state, save_state, load_agents_state, save_agents_state
 )
 
 app = Flask(__name__, static_folder=None)
 app.config['JSON_AS_ASCII'] = False
 
+# Star Office 静态文件路径
+STAR_OFFICE_STATIC = os.path.join(os.path.dirname(__file__), 'templates', 'star_office', 'static')
+
 # 注册 Star Office UI 蓝图
+from nova_platform.star_office import star_office_bp
 app.register_blueprint(star_office_bp, url_prefix='/office')
 
 # Star Office 静态文件路由
@@ -104,7 +135,7 @@ def get_projects():
             'status': t.status,
             'priority': t.priority,
             'assignee': None,
-            'due_date': t.due_date.strftime('%Y-%m-%d %H:%M') if t.due_date else None
+            'due_date': format_date(t.due_date) if t.due_date else None
         } for t in todos]
         
         # 查找 assignee 名称
@@ -120,7 +151,7 @@ def get_projects():
             'description': p.description,
             'status': p.status,
             'template': p.template,
-            'created_at': p.created_at.strftime('%Y-%m-%d %H:%M'),
+            'created_at': format_datetime(p.created_at),
             'progress': progress,
             'stats': {
                 'total': total,
@@ -151,7 +182,7 @@ def get_employees():
             'type': e.type,
             'role': e.role,
             'skills': e.skills,
-            'created_at': e.created_at.strftime('%Y-%m-%d %H:%M'),
+            'created_at': format_datetime(e.created_at),
             'todo_count': len(todos),
             'todos': [{
                 'id': t.id,
@@ -203,6 +234,57 @@ def api_project(project_id):
             return jsonify(proj)
     
     return jsonify({'error': 'Project not found'}), 404
+
+
+@app.route('/api/todo/<todo_id>')
+def api_todo_detail(todo_id):
+    """获取单个任务详情"""
+    session = get_session()
+
+    # 查询任务及其关联信息
+    todo = session.query(Todo).filter_by(id=todo_id).first()
+
+    if not todo:
+        return jsonify({"error": "任务不存在"}), 404
+
+    # 获取指派的员工信息
+    assignee = None
+    if todo.assignee_id:
+        assignee = session.query(Employee).filter_by(id=todo.assignee_id).first()
+
+    # 获取项目信息
+    project = session.query(Project).filter_by(id=todo.project_id).first()
+
+    # 解析依赖关系
+    import json
+    depends_on = []
+    if todo.depends_on:
+        try:
+            depends_on = json.loads(todo.depends_on)
+        except:
+            pass
+
+    return jsonify({
+        "id": todo.id,
+        "title": todo.title,
+        "description": todo.description,
+        "status": todo.status,
+        "priority": todo.priority,
+        "project_id": todo.project_id,
+        "project_name": project.name if project else "未知项目",
+        "assignee_id": todo.assignee_id,
+        "assignee": assignee.name if assignee else None,
+        "assignee_type": assignee.type if assignee else None,
+        "due_date": format_date(todo.due_date),
+        "work_summary": todo.work_summary,
+        "completed_at": format_datetime(todo.completed_at),
+        "created_at": format_datetime(todo.created_at),
+        "updated_at": format_datetime(todo.updated_at),
+        "agent_task_id": todo.agent_task_id,
+        "session_id": todo.session_id,
+        "process_id": todo.process_id,
+        "dependencies": []
+    })
 
 
 @app.route('/api/sync-star-office', methods=['POST'])
