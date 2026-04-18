@@ -310,25 +310,30 @@ def project():
 @click.argument("name")
 @click.option("--description", default="", help="Project description")
 @click.option("--template", type=click.Choice(["software_dev", "content_ops", "general"]), default="general", help="Project template")
-@click.option("--leader", "leader_id", help="Employee ID to assign as project leader")
+@click.option("--leader", "leader_id", help="Employee ID to assign as project leader (will create planning todo)")
 @click.option("--workspace", "workspace_path", help="Custom workspace path (default: ~/.nova/workspaces/<project_id>)")
 def project_create(session, name, description, template, leader_id, workspace_path):
     """Create a new project."""
     session = session["session"]
-    from nova_platform.services import project_member_service
 
-    proj = project_service.create_project(session, name, description, template, workspace_path)
+    proj = project_service.create_project(session, name, description, template, workspace_path, leader_id)
     click.echo(click.style(f"Created project: ", fg="green") + click.style(proj.name, bold=True))
-    click.echo(f"ID: {proj.id}")
+    click.echo(f"ID:        {proj.id}")
+    click.echo(f"Status:    {proj.status.upper()}")
     click.echo(f"Workspace: {proj.workspace_path}")
 
-    # 如果指定了 leader，添加到项目
+    # 如果指定了 leader，显示规划任务已创建
     if leader_id:
-        result = project_member_service.add_member_to_project(session, proj.id, leader_id, role="leader")
-        if result["success"]:
-            click.echo(f"Leader assigned: {leader_id[:8]}")
+        from nova_platform.services import project_member_service
+        is_member = project_member_service.is_member_in_project(session, proj.id, leader_id)
+        if is_member:
+            click.echo(f"Leader:    {leader_id[:8]}")
+            click.echo(click.style(f"Planning todo created for leader.", fg="cyan"))
+            click.echo(click.style(f"Use 'nova project start {proj.id}' to activate the project.", fg="yellow"))
         else:
-            click.echo(click.style(f"Warning: Failed to assign leader - {result['error']}", fg="yellow"))
+            click.echo(click.style(f"Warning: Failed to assign leader", fg="yellow"))
+    else:
+        click.echo(click.style(f"Use 'nova project start {proj.id}' to activate the project.", fg="yellow"))
 
 
 @project.command(name="list")
@@ -341,7 +346,7 @@ def project_list(session):
         click.echo("No projects found.")
         return
     for p in projects:
-        status_color = {"planning": "yellow", "active": "green", "completed": "blue", "paused": "red"}.get(p.status, "white")
+        status_color = {"pending": "cyan", "planning": "yellow", "active": "green", "completed": "blue", "paused": "red"}.get(p.status, "white")
         click.echo(f"{p.id}  {click.style(p.status.upper(), fg=status_color):10}  {p.name}")
 
 
@@ -371,7 +376,7 @@ def project_view(session, project_id):
 @project.command(name="update")
 @click.pass_obj
 @click.argument("project_id")
-@click.option("--status", type=click.Choice(["planning", "active", "completed", "paused"]), help="Project status")
+@click.option("--status", type=click.Choice(["pending", "planning", "active", "completed", "paused"]), help="Project status")
 def project_update(session, project_id, status):
     """Update project details."""
     session = session["session"]
@@ -380,6 +385,82 @@ def project_update(session, project_id, status):
         click.echo(click.style(f"Project not found: {project_id}", fg="red"), err=True)
         return
     click.echo(click.style(f"Updated project: ", fg="green") + proj.name)
+
+
+@project.command(name="start")
+@click.pass_obj
+@click.argument("project_id")
+def project_start(session, project_id):
+    """Start a project and trigger leader to begin planning."""
+    session = session["session"]
+
+    proj = project_service.get_project(session, project_id)
+    if not proj:
+        click.echo(click.style(f"Project not found: {project_id}", fg="red"), err=True)
+        return
+
+    if proj.status == "active":
+        click.echo(click.style(f"Project is already active.", fg="yellow"))
+        return
+
+    # 更新项目状态为 active
+    proj.status = "active"
+    session.commit()
+
+    click.echo(click.style(f"Project started: ", fg="green") + click.style(proj.name, bold=True))
+    click.echo(f"Status: {proj.status.upper()}")
+
+    # 查找项目成员中的 leader
+    from nova_platform.services import project_member_service
+    from nova_platform.models import Todo
+    import json
+
+    members = project_member_service.list_project_members(session, project_id, role="leader")
+
+    if not members:
+        click.echo(click.style("No leader assigned to project. Use 'nova project member add' to assign one.", fg="yellow"))
+        return
+
+    leader_info = members[0]
+    leader_emp = leader_info["employee"]
+
+    # 查找规划任务
+    planning_todo = session.query(Todo).filter_by(
+        project_id=project_id,
+        assignee_id=leader_emp.id,
+        status="pending"
+    ).filter(Todo.title.like(f"%项目规划%")).first()
+
+    if not planning_todo:
+        click.echo(click.style(f"No pending planning todo found for leader {leader_emp.name}", fg="yellow"))
+        return
+
+    # 检查 leader 是否是 agent 类型
+    if leader_emp.type not in ("openclaw", "hermes", "claude-code"):
+        click.echo(click.style(f"Leader {leader_emp.name} is a human employee. Manual planning required.", fg="cyan"))
+        click.echo(f"Planning todo: {planning_todo.title}")
+        return
+
+    # 异步分发任务给 leader agent
+    from nova_platform.services import agent_service
+
+    click.echo(f"Dispatching planning task to leader: {leader_emp.name}...")
+
+    result = agent_service.dispatch_task_async(
+        session=session,
+        employee_id=leader_emp.id,
+        task=planning_todo.title + "\n\n" + planning_todo.description,
+        project_id=project_id,
+        todo_id=planning_todo.id
+    )
+
+    if result["success"]:
+        click.echo(click.style(f"Planning task dispatched successfully!", fg="green"))
+        click.echo(f"Process ID: {result['process_id']}")
+        click.echo(f"Session ID: {result['session_id']}")
+        click.echo(click.style(f"Use 'nova project logs {project_id} -f' to monitor progress.", fg="cyan"))
+    else:
+        click.echo(click.style(f"Failed to dispatch task: {result.get('error', 'Unknown error')}", fg="red"), err=True)
 
 
 @project.command(name="set-workspace")
@@ -797,6 +878,22 @@ def employee_view(session, employee_id):
     click.echo(f"Created: {emp.created_at.strftime('%Y-%m-%d %H:%M')}")
 
 
+@employee.command(name="set-role")
+@click.pass_obj
+@click.argument("employee_id")
+@click.option("--role", required=True, help="New role for the employee")
+def employee_set_role(session, employee_id, role):
+    """Set the role of an employee."""
+    session = session["session"]
+    emp = employee_service.update_employee(session, employee_id, role=role)
+    if not emp:
+        click.echo(click.style(f"Employee not found: {employee_id}", fg="red"), err=True)
+        return
+    click.echo(click.style(f"Updated employee role: ", fg="green") + click.style(emp.name, bold=True))
+    click.echo(f"ID:   {emp.id}")
+    click.echo(f"Role: {emp.role}")
+
+
 @employee.command(name="assign")
 @click.pass_obj
 @click.argument("employee_id")
@@ -935,7 +1032,7 @@ def status(session):
         pending = sum(1 for t in todos if t.status == "pending")
         in_progress = sum(1 for t in todos if t.status == "in_progress")
         completed = sum(1 for t in todos if t.status == "completed")
-        status_color = {"planning": "yellow", "active": "green", "completed": "blue", "paused": "red"}.get(p.status, "white")
+        status_color = {"pending": "cyan", "planning": "yellow", "active": "green", "completed": "blue", "paused": "red"}.get(p.status, "white")
         click.echo(f"\n{click.style(p.name, bold=True)} [{click.style(p.status.upper(), fg=status_color)}]")
         click.echo(f"  {pending} pending | {in_progress} in progress | {completed} completed")
 

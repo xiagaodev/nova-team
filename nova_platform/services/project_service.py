@@ -11,7 +11,8 @@ def create_project(
     name: str,
     description: str = "",
     template: str = "general",
-    workspace_path: str = None
+    workspace_path: str = None,
+    leader_id: str = None
 ) -> Project:
     """
     创建项目
@@ -22,11 +23,13 @@ def create_project(
         description: 项目描述
         template: 项目模板
         workspace_path: 工作空间路径（如果为 None，自动创建）
+        leader_id: 项目负责人ID（可选，如果提供则自动添加为leader并创建规划任务）
 
     Returns:
         Project 对象
     """
-    project = Project(name=name, description=description, template=template)
+    # 默认状态为 pending（待启动）
+    project = Project(name=name, description=description, template=template, status="pending")
 
     # 如果未指定工作空间，自动创建
     if workspace_path is None:
@@ -46,6 +49,26 @@ def create_project(
 
     # 创建工作空间目录
     ensure_workspace(project.workspace_path)
+
+    # 如果指定了 leader，添加到项目并创建规划任务
+    if leader_id:
+        from nova_platform.services import project_member_service
+        member_result = project_member_service.add_member_to_project(
+            session, project.id, leader_id, role="leader"
+        )
+        if member_result["success"]:
+            # 创建项目规划待办任务
+            planning_todo = Todo(
+                title=f"项目规划：{project.name}",
+                description=f"请为项目 {project.name} 制定详细的规划方案。\n\n项目描述：{project.description}\n模板：{project.template}\n\n请创建以下内容：\n1. 项目目标拆解\n2. 技术方案设计\n3. 任务分解（TODO列表）\n4. 里程碑规划",
+                project_id=project.id,
+                assignee_id=leader_id,
+                priority="high",
+                status="pending"
+            )
+            session.add(planning_todo)
+            session.commit()
+            session.refresh(project)
 
     return project
 

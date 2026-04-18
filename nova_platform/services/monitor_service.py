@@ -120,7 +120,7 @@ def get_system_health() -> dict:
         for todo in in_progress:
             if todo.agent_task_id:
                 task_info = task_state_service.get_task_status(session, todo.agent_task_id)
-                if task_info.get("status") == "running":
+                if task_info and task_info.get("status") == "running":
                     pid = task_info.get("pid")
                     if pid:
                         status = check_agent_process_status(pid)
