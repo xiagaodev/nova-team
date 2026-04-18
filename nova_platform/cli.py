@@ -1,8 +1,50 @@
 import click
+import os
+import sys
+import signal
+import time
+import fcntl
 from datetime import datetime
 from nova_platform.database import get_session, init_db
 from nova_platform.services import project_service, employee_service, todo_service, agent_service, automation_service
 from nova_platform.models import Todo
+from nova_platform.config import load_config, get_config, get_server_config, get_env, is_production
+
+# PID file location
+PID_DIR = os.path.expanduser("~/.nova-platform")
+PID_FILE = os.path.join(PID_DIR, "nova-server.pid")
+LOG_FILE = os.path.join(PID_DIR, "nova-server.log")
+
+def pid_file_exists():
+    """Check if PID file exists and process is running."""
+    if not os.path.exists(PID_FILE):
+        return False
+    try:
+        with open(PID_FILE, 'r') as f:
+            pid = int(f.read().strip())
+        # Check if process exists
+        os.kill(pid, 0)
+        return True
+    except (ValueError, ProcessLookupError, PermissionError):
+        # Invalid PID or process doesn't exist
+        return False
+
+def read_pid():
+    """Read PID from file."""
+    try:
+        with open(PID_FILE, 'r') as f:
+            return int(f.read().strip())
+    except:
+        return None
+
+def remove_pid_file():
+    """Remove stale PID file."""
+    if os.path.exists(PID_FILE):
+        os.remove(PID_FILE)
+
+def ensure_pid_dir():
+    """Ensure PID directory exists."""
+    os.makedirs(PID_DIR, exist_ok=True)
 
 
 @click.group()
@@ -12,6 +54,248 @@ def cli(ctx):
     init_db()
     ctx.ensure_object(dict)
     ctx.obj["session"] = get_session()
+
+
+# ============================================================
+# Server daemon commands
+# ============================================================
+@cli.group(name="server")
+def server():
+    """Server daemon management commands."""
+    pass
+
+
+@server.command(name="start")
+@click.option("--host", default=None, help="Host to bind to")
+@click.option("--port", default=None, type=int, help="Port to bind to")
+@click.option("--debug", is_flag=True, help="Enable debug mode")
+@click.option("--force", is_flag=True, help="Force start even if already running")
+@click.option("--config", "config_path", default=None, help="Path to config file")
+def server_start(host, port, debug, force, config_path):
+    """Start the Nova Platform web server as a daemon."""
+    # Load configuration
+    if config_path:
+        cfg = load_config(config_path)
+    else:
+        cfg = get_config()
+    
+    server_cfg = cfg.get("server", {})
+    
+    # Use CLI args or fall back to config
+    bind_host = host if host is not None else server_cfg.get("host", "0.0.0.0")
+    bind_port = port if port is not None else server_cfg.get("port", 5000)
+    use_debug = debug or cfg.get("environment") == "development"
+    
+    ensure_pid_dir()
+    
+    if pid_file_exists():
+        pid = read_pid()
+        if force:
+            click.echo(click.style(f"Force starting... (killing old process {pid})", fg="yellow"))
+            try:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(1)
+            except ProcessLookupError:
+                pass
+            remove_pid_file()
+        else:
+            click.echo(click.style(f"Nova server is already running (PID: {pid})", fg="red"))
+            click.echo(f"Use 'nova server start --force' to restart.")
+            return
+    
+    click.echo(f"Starting Nova server on {bind_host}:{bind_port}...")
+    if use_debug:
+        click.echo(click.style(f"Debug mode enabled ({get_env()} environment)", fg="yellow"))
+    
+    # Fork the process
+    try:
+        pid = os.fork()
+        if pid > 0:
+            # Parent process - wait briefly and check if child started successfully
+            time.sleep(0.5)
+            if pid_file_exists():
+                pid = read_pid()
+                click.echo(click.style(f"Nova server started (PID: {pid})", fg="green"))
+                click.echo(f"Log file: {LOG_FILE}")
+                click.echo(f"Web UI: http://{bind_host}:{bind_port}/")
+            else:
+                click.echo(click.style("Failed to start server. Check log file.", fg="red"))
+            sys.exit(0)
+    except OSError as e:
+        click.echo(click.style(f"Fork failed: {e}", fg="red"), err=True)
+        sys.exit(1)
+    
+    # Child process - become session leader
+    os.setsid()
+    
+    # Redirect standard file descriptors
+    with open(LOG_FILE, 'a') as log:
+        # Redirect stdin
+        fd = os.open(os.devnull, os.O_RDWR)
+        os.dup2(fd, 0)
+        os.close(fd)
+        # Redirect stdout and stderr to log
+        os.dup2(log.fileno(), 1)
+        os.dup2(log.fileno(), 2)
+    
+    # Write PID file
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    
+    # Start Flask server
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    from app import app
+    try:
+        app.run(host=bind_host, port=bind_port, debug=use_debug, use_reloader=False)
+    except Exception as e:
+        with open(LOG_FILE, 'a') as log:
+            log.write(f"[FATAL] Server error: {e}\n")
+        remove_pid_file()
+        os._exit(1)
+
+
+@server.command(name="stop")
+@click.option("--timeout", default=10, type=int, help="Seconds to wait before SIGKILL")
+def server_stop(timeout):
+    """Stop the Nova Platform server daemon."""
+    if not pid_file_exists():
+        click.echo(click.style("Nova server is not running.", fg="yellow"))
+        return
+    
+    pid = read_pid()
+    click.echo(f"Stopping Nova server (PID: {pid})...")
+    
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        click.echo(click.style("Process not found. Removing stale PID file.", fg="yellow"))
+        remove_pid_file()
+        return
+    
+    # Wait for process to exit
+    for i in range(timeout * 10):
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            break
+    else:
+        click.echo(click.style(f"Process did not stop gracefully. Sending SIGKILL...", fg="yellow"))
+        try:
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.5)
+        except ProcessLookupError:
+            pass
+    
+    remove_pid_file()
+    click.echo(click.style("Nova server stopped.", fg="green"))
+
+
+@server.command(name="status")
+def server_status():
+    """Show the status of the Nova Platform server."""
+    if pid_file_exists():
+        pid = read_pid()
+        try:
+            os.kill(pid, 0)
+            click.echo(click.style(f"🟢 Nova server is running (PID: {pid})", fg="green"))
+            click.echo(f"Log file: {LOG_FILE}")
+            # Show config being used
+            env = get_env()
+            srv = get_server_config()
+            click.echo(f"Config: {env} environment")
+            click.echo(f"Server: {srv.get('host')}:{srv.get('port')}")
+        except ProcessLookupError:
+            click.echo(click.style("⚠ PID file exists but process is not running.", fg="yellow"))
+            click.echo("Run 'nova server stop' to remove stale PID file.")
+    else:
+        click.echo(click.style("⚠ Nova server is not running.", fg="red"))
+
+
+@server.command(name="config")
+@click.option("--show", is_flag=True, help="Show current configuration")
+@click.option("--init", is_flag=True, help="Initialize config file in ~/.nova-platform/")
+def server_config(show, init):
+    """Manage Nova server configuration."""
+    config_dir = os.path.expanduser("~/.nova-platform")
+    config_file = os.path.join(config_dir, "config.yaml")
+    
+    if init:
+        os.makedirs(config_dir, exist_ok=True)
+        if os.path.exists(config_file):
+            click.echo(click.style(f"Config already exists: {config_file}", fg="yellow"))
+        else:
+            import shutil
+            src = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.example.yaml")
+            if os.path.exists(src):
+                shutil.copy(src, config_file)
+                click.echo(click.style(f"Created config: {config_file}", fg="green"))
+            else:
+                click.echo(click.style("config.example.yaml not found", fg="red"))
+        return
+    
+    if show:
+        cfg = get_config()
+        import json
+        click.echo(json.dumps(cfg, indent=2, default=str))
+        return
+    
+    # Default: show help
+    click.echo("Config file locations (checked in order):")
+    for loc in ["config.yaml", "~/.nova-platform/config.yaml", "/etc/nova-platform/config.yaml"]:
+        expanded = os.path.expanduser(loc)
+        exists = "✓" if os.path.exists(expanded) else "✗"
+        click.echo(f"  {exists} {expanded}")
+    click.echo("")
+    click.echo("Use 'nova server config --init' to create a config file.")
+
+
+@server.command(name="restart")
+@click.option("--host", default=None, help="Host to bind to")
+@click.option("--port", default=None, type=int, help="Port to bind to")
+@click.option("--debug", is_flag=True, help="Enable debug mode")
+@click.option("--config", "config_path", default=None, help="Path to config file")
+def server_restart(host, port, debug, config_path):
+    """Restart the Nova Platform server daemon."""
+    if pid_file_exists():
+        ctx = click.get_current_context()
+        ctx.invoke(server_stop)
+        time.sleep(1)
+    ctx = click.get_current_context()
+    ctx.invoke(server_start, host=host, port=port, debug=debug, config_path=config_path)
+
+
+@server.command(name="logs")
+@click.option("--lines", default=50, type=int, help="Number of lines to show")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output (tail -f)")
+def server_logs(lines, follow):
+    """Show Nova server logs."""
+    if not os.path.exists(LOG_FILE):
+        click.echo(click.style("No log file found.", fg="yellow"))
+        return
+    
+    with open(LOG_FILE, 'r') as f:
+        # Read last N lines
+        all_lines = f.readlines()
+        tail_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+    
+    for line in tail_lines:
+        click.echo(line.rstrip())
+    
+    if follow:
+        click.echo(click.style("--- Following log (Ctrl+C to exit) ---", fg="cyan"))
+        try:
+            with open(LOG_FILE, 'r') as f:
+                # Seek to end
+                f.seek(0, 2)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        time.sleep(0.5)
+                    else:
+                        click.echo(line.rstrip())
+        except KeyboardInterrupt:
+            pass
 
 
 # Project subcommands

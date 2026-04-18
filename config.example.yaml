@@ -1,0 +1,27 @@
+# Nova Platform Configuration
+# Copy to config.yaml and modify as needed
+
+# Environment: development | production
+environment: development
+
+# Server settings
+server:
+  host: 0.0.0.0
+  port: 5000
+  debug: false
+
+# Logging
+logging:
+  level: INFO
+  file: ~/.nova-platform/nova-server.log
+  max_size_mb: 10
+  backup_count: 3
+
+# Database
+database:
+  path: ~/.nova-platform/nova.db
+
+# Star Office
+star_office:
+  enabled: true
+  static_path: templates/star_office/static
