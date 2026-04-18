@@ -4,9 +4,7 @@ import subprocess
 import uuid
 import os
 import signal
-import time
-import psutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict
 from concurrent.futures import ThreadPoolExecutor
@@ -14,46 +12,10 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy.orm import Session
 
 from nova_platform.models import Employee, Todo
+from nova_platform.services import task_state_service
 
 # 全局线程池，用于并行分发任务
 _executor = ThreadPoolExecutor(max_workers=10)
-
-# 任务状态文件目录
-_TASK_STATE_DIR = "/tmp/nova_agent_tasks"
-
-
-def _get_task_state_file(task_id: str) -> str:
-    """获取任务状态文件路径"""
-    return f"{_TASK_STATE_DIR}/{task_id}.json"
-
-
-def _load_task_state(task_id: str) -> dict:
-    """从文件加载任务状态"""
-    import json
-    filepath = _get_task_state_file(task_id)
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
-
-
-def _save_task_state(task_id: str, state: dict):
-    """保存任务状态到文件"""
-    import json
-    os.makedirs(_TASK_STATE_DIR, exist_ok=True)
-    filepath = _get_task_state_file(task_id)
-    with open(filepath, 'w') as f:
-        json.dump(state, f)
-
-
-def _delete_task_state(task_id: str):
-    """删除任务状态文件"""
-    filepath = _get_task_state_file(task_id)
-    if os.path.exists(filepath):
-        os.remove(filepath)
 
 
 def _run_command(cmd: list[str], timeout: int = 120) -> dict:
@@ -331,10 +293,10 @@ def dispatch_task(session: Session, employee_id: str, task: str, project_id: str
 # 异步任务分发（优化 2）
 # ============================================================================
 
-def _run_agent_async(task_id: str, agent_type: str, agent_id: str, task: str, agent_config: str = None):
+def _run_agent_async(task_id: str, agent_type: str, agent_id: str, task: str, agent_config: str = None, db_session=None):
     """
     在后台线程中运行 agent 任务，不阻塞主线程
-    任务完成后更新状态到文件
+    任务完成后更新状态到数据库
     """
     try:
         if agent_type == "openclaw":
@@ -352,17 +314,18 @@ def _run_agent_async(task_id: str, agent_type: str, agent_id: str, task: str, ag
                     cmd,
                     stdout=f,
                     stderr=subprocess.STDOUT,
-                    preexec_fn=os.setsid  # 脱离进程组
+                    preexec_fn=os.setsid if os.name != 'nt' else None
                 )
-            
-            _save_task_state(task_id, {
-                "status": "running",
-                "pid": proc.pid,
-                "output_file": output_file,
-                "started_at": str(time.time())
-            })
+
+            # 更新数据库状态
+            if db_session:
+                task_state_service.update_task_status(
+                    db_session, task_id,
+                    status="running",
+                    pid=proc.pid
+                )
             return {"dispatched": True, "task_id": task_id}
-            
+
         elif agent_type == "hermes":
             # Hermes agent - 后台执行
             cmd = ["hermes", "--profile", agent_id, "chat", "-q", task]
@@ -372,67 +335,75 @@ def _run_agent_async(task_id: str, agent_type: str, agent_id: str, task: str, ag
                     cmd,
                     stdout=f,
                     stderr=subprocess.STDOUT,
-                    preexec_fn=os.setsid
+                    preexec_fn=os.setsid if os.name != 'nt' else None
                 )
-            
-            _save_task_state(task_id, {
-                "status": "running",
-                "pid": proc.pid,
-                "output_file": output_file,
-                "started_at": str(time.time())
-            })
+
+            if db_session:
+                task_state_service.update_task_status(
+                    db_session, task_id,
+                    status="running",
+                    pid=proc.pid
+                )
             return {"dispatched": True, "task_id": task_id}
-        
+
         elif agent_type == "claude-code":
             # Claude Code agent - 后台执行
             config = json.loads(agent_config) if agent_config else {}
             model = config.get("model")
             max_turns = config.get("max_turns", 10)
-            
+
             cmd = ["claude", "-p", task, f"--max-turns={max_turns}"]
             if model:
                 cmd.insert(1, f"--model={model}")
-            
+
             output_file = f"/tmp/claude_task_{task_id}.output"
             with open(output_file, "w") as f:
                 proc = subprocess.Popen(
                     cmd,
                     stdout=f,
                     stderr=subprocess.STDOUT,
-                    preexec_fn=os.setsid
+                    preexec_fn=os.setsid if os.name != 'nt' else None
                 )
-            
-            _save_task_state(task_id, {
-                "status": "running",
-                "pid": proc.pid,
-                "output_file": output_file,
-                "started_at": str(time.time())
-            })
+
+            if db_session:
+                task_state_service.update_task_status(
+                    db_session, task_id,
+                    status="running",
+                    pid=proc.pid
+                )
             return {"dispatched": True, "task_id": task_id}
-        
+
     except Exception as e:
-        _save_task_state(task_id, {
-            "status": "failed",
-            "error": str(e)
-        })
+        if db_session:
+            task_state_service.update_task_status(
+                db_session, task_id,
+                status="failed",
+                error=str(e)
+            )
         return {"dispatched": False, "error": str(e)}
 
 
 def dispatch_task_async(session: Session, employee_id: str, task: str, project_id: str = None) -> dict:
     """
     异步分配任务给 agent，立即返回，不等待执行结果
-    
+
     Returns:
         {"success": True, "task_id": "xxx", "status": "dispatched"}
     """
     employee = session.query(Employee).filter_by(id=employee_id).first()
-    
+
     if not employee:
         return {"success": False, "error": "Employee not found"}
-    
-    # 生成唯一任务 ID
-    task_id = f"{employee_id[:8]}_{uuid.uuid4().hex[:8]}"
-    
+
+    # 创建数据库任务记录
+    db_task = task_state_service.create_async_task(
+        session,
+        employee_id=employee_id,
+        todo_id=project_id  # 这里project_id实际上可能是todo_id，需要调整
+    )
+
+    task_id = db_task.id
+
     if employee.type in ("openclaw", "hermes", "claude-code"):
         # 提交到线程池异步执行
         _executor.submit(
@@ -441,9 +412,10 @@ def dispatch_task_async(session: Session, employee_id: str, task: str, project_i
             employee.type,
             employee.agent_id,
             task,
-            employee.agent_config  # 传递配置
+            employee.agent_config,  # 传递配置
+            session  # 传递数据库会话
         )
-        
+
         return {
             "success": True,
             "task_id": task_id,
@@ -454,180 +426,42 @@ def dispatch_task_async(session: Session, employee_id: str, task: str, project_i
         return {"success": False, "error": f"Employee type {employee.type} cannot execute tasks"}
 
 
-def get_async_task_status(task_id: str) -> dict:
+def get_async_task_status(session: Session, task_id: str) -> dict:
     """
     查询异步任务状态
-    
+
     Returns:
         {"status": "running|completed|failed", "output": "...", "error": "..."}
     """
-    task_info = _load_task_state(task_id)
+    task_info = task_state_service.get_task_status(session, task_id)
     if not task_info:
         return {"status": "unknown", "error": "Task not found"}
-    
-    if task_info["status"] == "running":
-        # 检查进程是否还在运行
-        pid = task_info.get("pid")
-        if pid:
-            try:
-                os.kill(pid, 0)  # 检查进程是否存在
-                return {"status": "running", "pid": pid}
-            except OSError:
-                # 进程已结束，更新状态
-                task_info["status"] = "completed"
-                _save_task_state(task_id, task_info)
-        
-    output_file = task_info.get("output_file")
-    if output_file and os.path.exists(output_file):
-        try:
-            with open(output_file, "r") as f:
-                output = f.read()
-            return {
-                "status": task_info["status"],
-                "output": output
-            }
-        except Exception:
-            pass
-    
-    return {
-        "status": task_info["status"],
-        "error": task_info.get("error")
-    }
+
+    return task_info
 
 
-def cancel_async_task(task_id: str) -> dict:
+def cancel_async_task(session: Session, task_id: str) -> dict:
     """取消正在运行的异步任务"""
-    task_info = _load_task_state(task_id)
-    if not task_info:
+    result = task_state_service.cancel_task(session, task_id)
+    if not result:
         return {"success": False, "error": "Task not found"}
-    
-    pid = task_info.get("pid")
-    
-    if pid:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-            task_info["status"] = "cancelled"
-            _save_task_state(task_id, task_info)
-            return {"success": True, "message": "Task cancelled"}
-        except OSError:
-            pass
-    
-    task_info["status"] = "cancelled"
-    _save_task_state(task_id, task_info)
     return {"success": True, "message": "Task cancelled"}
 
 
 # ============================================================================
-# Agent 进程存活检查
+# Agent 进程存活检查（使用task_state_service中的实现）
 # ============================================================================
 
-def check_agent_process_status(pid: int) -> str:
-    """
-    检查 agent 进程状态
-    
-    Returns:
-        "running" - 进程正在运行
-        "completed" - 进程已结束（正常退出）
-        "zombie" - 僵尸进程
-        "dead" - 进程不存在
-    """
-    try:
-        # 检查进程是否存在
-        os.kill(pid, 0)
-    except OSError:
-        return "dead"
-    
-    try:
-        proc = psutil.Process(pid)
-        status = proc.status()
-        
-        if status in (psutil.STATUS_ZOMBIE, "zombie"):
-            return "zombie"
-        elif status == psutil.STATUS_DEAD:
-            return "dead"
-        else:
-            # 检查进程是否有活跃的子进程（agent 进程本身）
-            return "running"
-    except psutil.NoSuchProcess:
-        return "dead"
-    except psutil.AccessDenied:
-        return "running"  # 无法访问但进程存在
+# 这些函数已经移到 task_state_service 中
+# check_agent_process_status -> task_state_service.check_process_running
+# check_todo_agent_status -> task_state_service.check_todo_agent_status
 
+# 为了向后兼容，保留这些函数作为代理
+def check_agent_process_status(pid: int) -> str:
+    """检查 agent 进程状态（已废弃，使用task_state_service.check_process_running）"""
+    return task_state_service.check_process_running(pid)
 
 def check_todo_agent_status(session: Session, todo_id: str, auto_commit: bool = True) -> dict:
-    """
-    检查 Todo 对应的 agent 任务是否完成
-    
-    流程：
-    1. 查找 Todo 的 agent_task_id
-    2. 从文件获取任务状态
-    3. 如果任务完成，更新 Todo 状态
-    
-    Args:
-        session: 数据库 session
-        todo_id: Todo ID
-        auto_commit: 是否自动提交，False 时只修改对象不提交
-    
-    Returns:
-        {"status": "running|completed|failed|unknown", "todo_updated": bool}
-    """
-    todo = session.query(Todo).filter_by(id=todo_id).first()
-    if not todo:
-        return {"status": "unknown", "error": "Todo not found", "todo_updated": False}
-    
-    # 如果没有 agent_task_id，说明不是 agent 任务
-    if not todo.agent_task_id:
-        return {"status": "unknown", "error": "No agent task", "todo_updated": False}
-    
-    task_id = todo.agent_task_id
-    
-    # 从文件获取状态
-    task_info = _load_task_state(task_id)
-    if not task_info:
-        # 任务不存在，说明已经结束但状态文件被清理，自动标记完成
-        if todo.status == "in_progress":
-            todo.status = "completed"
-            todo.updated_at = datetime.utcnow()
-            if auto_commit:
-                session.commit()
-            return {"status": "completed", "todo_updated": True, "message": "Task file missing, auto-completed"}
-        return {"status": "unknown", "error": "Task not found in state files", "todo_updated": False}
-    
-    if task_info["status"] == "running":
-        # 检查进程是否真的在运行
-        pid = task_info.get("pid")
-        if pid:
-            process_status = check_agent_process_status(pid)
-            if process_status in ("dead", "zombie"):
-                # 进程已死但状态未更新，修正状态
-                task_info["status"] = "completed"
-                _save_task_state(task_id, task_info)
-            else:
-                return {"status": "running", "todo_updated": False}
-        else:
-            return {"status": "running", "todo_updated": False}
-    
-    # 任务已结束
-    if task_info["status"] == "completed":
-        # 自动更新 Todo 状态为 completed
-        if todo.status != "completed":
-            todo.status = "completed"
-            todo.updated_at = datetime.utcnow()
-            if auto_commit:
-                session.commit()
-            return {"status": "completed", "todo_updated": True}
-        return {"status": "completed", "todo_updated": False}
-    
-    elif task_info["status"] == "failed":
-        # 任务失败，重置为 pending 供重试
-        if todo.status != "pending":
-            todo.status = "pending"
-            todo.assignee_id = None  # 解除分配，稍后重新分配
-            todo.updated_at = datetime.utcnow()
-            if auto_commit:
-                session.commit()
-            return {"status": "failed", "todo_updated": True, "message": "Task failed, reset to pending"}
-        return {"status": "failed", "todo_updated": False}
-    
-    return {"status": task_info["status"], "todo_updated": False}
+    """检查Todo对应的agent任务是否完成（已废弃，使用task_state_service.check_todo_agent_status）"""
+    return task_state_service.check_todo_agent_status(session, todo_id, auto_commit)
 

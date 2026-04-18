@@ -794,5 +794,157 @@ def knowledge_list(session, project_id):
         click.echo("No knowledge entries yet.")
 
 
+# OKR subcommands (目标与关键结果)
+@cli.group(name="okr")
+def okr():
+    """OKR (Objectives and Key Results) management commands."""
+    pass
+
+
+from nova_platform.services import okr_service
+
+
+@okr.command(name="create")
+@click.pass_obj
+@click.argument("project_id")
+@click.argument("objective")
+@click.option("--target", "target_value", type=float, required=True, help="目标值")
+@click.option("--unit", default="", help="单位 (%, 个, 次等)")
+@click.option("--due", "due_date", help="截止日期 (YYYY-MM-DD)")
+def okr_create(session, project_id, objective, target_value, unit, due_date):
+    """创建新的OKR"""
+    session = session["session"]
+
+    from datetime import datetime
+    due = None
+    if due_date:
+        try:
+            due = datetime.strptime(due_date, "%Y-%m-%d")
+        except ValueError:
+            click.echo(click.style(f"Invalid date format: {due_date}. Use YYYY-MM-DD.", fg="red"), err=True)
+            return
+
+    okr = okr_service.create_okr(
+        session,
+        project_id=project_id,
+        objective=objective,
+        target_value=target_value,
+        unit=unit,
+        due_date=due
+    )
+
+    click.echo(click.style(f"Created OKR: ", fg="green") + click.style(okr.objective, bold=True))
+    click.echo(f"ID: {okr.id}")
+    click.echo(f"Target: {okr.target_value} {okr.unit}")
+
+
+@okr.command(name="list")
+@click.pass_obj
+@click.argument("project_id")
+def okr_list(session, project_id):
+    """列出项目的所有OKR"""
+    session = session["session"]
+
+    okrs = okr_service.get_project_okrs(session, project_id)
+
+    if not okrs:
+        click.echo("No OKRs found for this project.")
+        return
+
+    click.echo(click.style("OKRs for project:", bold=True) + f" {project_id[:8]}")
+    click.echo("-" * 60)
+
+    for okr in okrs:
+        status_color = {
+            "on_track": "green",
+            "at_risk": "red",
+            "off_track": "yellow",
+            "achieved": "blue"
+        }.get(okr.status, "white")
+
+        progress = (okr.current_value / okr.target_value * 100) if okr.target_value > 0 else 0
+
+        click.echo(f"\n[{okr.id[:8]}] {okr.objective}")
+        click.echo(f"  进度: {okr.current_value}/{okr.target_value} {okr.unit} ({progress:.1f}%)")
+        click.echo(f"  状态: {click.style(okr.status.upper(), fg=status_color)}")
+        if okr.due_date:
+            click.echo(f"  截止: {okr.due_date.strftime('%Y-%m-%d')}")
+
+
+@okr.command(name="update")
+@click.pass_obj
+@click.argument("okr_id")
+@click.option("--current", "current_value", type=float, required=True, help="当前值")
+def okr_update(session, okr_id, current_value):
+    """更新OKR进度"""
+    session = session["session"]
+
+    okr = okr_service.update_okr_progress(session, okr_id, current_value)
+
+    if not okr:
+        click.echo(click.style(f"OKR not found: {okr_id}", fg="red"), err=True)
+        return
+
+    progress = (okr.current_value / okr.target_value * 100) if okr.target_value > 0 else 0
+
+    click.echo(click.style(f"Updated OKR: ", fg="green") + okr.objective)
+    click.echo(f"进度: {okr.current_value}/{okr.target_value} {okr.unit} ({progress:.1f}%)")
+    click.echo(f"状态: {okr.status.upper()}")
+
+
+@okr.command(name="health")
+@click.pass_obj
+@click.argument("project_id")
+def okr_health(session, project_id):
+    """检查OKR健康度"""
+    session = session["session"]
+
+    health = okr_service.check_okr_health(session, project_id)
+
+    overall_color = {
+        "healthy": "green",
+        "off_track": "yellow",
+        "at_risk": "red"
+    }.get(health["overall"], "white")
+
+    click.echo(click.style("OKR Health Report", bold=True))
+    click.echo("-" * 60)
+    click.echo(f"整体健康度: {click.style(health['overall'].upper(), fg=overall_color, bold=True)}")
+    click.echo()
+
+    for okr_info in health["okrs"]:
+        status_color = {
+            "on_track": "green",
+            "at_risk": "red",
+            "off_track": "yellow",
+            "achieved": "blue"
+        }.get(okr_info["status"], "white")
+
+        click.echo(f"[{okr_info['id'][:8]}] {okr_info['objective']}")
+        click.echo(f"  进度: {okr_info['progress']} - {click.style(okr_info['status'].upper(), fg=status_color)}")
+        if okr_info["due_date"]:
+            click.echo(f"  截止: {okr_info['due_date']}")
+
+
+@okr.command(name="summary")
+@click.pass_obj
+@click.argument("project_id")
+def okr_summary(session, project_id):
+    """显示OKR摘要统计"""
+    session = session["session"]
+
+    summary = okr_service.get_okr_summary(session, project_id)
+
+    click.echo(click.style("OKR Summary", bold=True))
+    click.echo("-" * 60)
+    click.echo(f"总数: {summary['total']}")
+    click.echo(f"已达成: {click.style(str(summary['achieved']), fg='green')}")
+    click.echo(f"正轨: {click.style(str(summary['on_track']), fg='green')}")
+    click.echo(f"风险: {click.style(str(summary['at_risk']), fg='red')}")
+    click.echo(f"偏离: {click.style(str(summary['off_track']), fg='yellow')}")
+    if summary['total'] > 0:
+        click.echo(f"平均进度: {summary['average_progress']*100:.1f}%")
+
+
 if __name__ == "__main__":
     cli()
